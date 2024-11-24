@@ -163,3 +163,7 @@ cython_debug/
 
 # data directories
 data/
+data-l1/
+
+# build directories
+build/

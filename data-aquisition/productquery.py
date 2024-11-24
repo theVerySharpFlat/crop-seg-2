@@ -16,7 +16,7 @@ def queryProducts(
 
     DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
-    queryURL = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and ContentDate/Start gt {year}-{month:02}-01T00:00:00.000Z and ContentDate/Start lt {year}-{month:02}-{DAYS_IN_MONTH[month - 1]}T00:00:00.000Z and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'tileId' and att/OData.CSC.StringAttribute/Value eq '{tile}') and Attributes/OData.CSC.DoubleAttribute/any(att:att/Name eq 'cloudCover' and att/OData.CSC.DoubleAttribute/Value le {maxCloudCover})&$top=1000&$expand=Attributes"
+    queryURL = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Collection/Name eq 'SENTINEL-2' and ContentDate/Start gt {year}-{month:02}-01T00:00:00.000Z and ContentDate/Start lt {year}-{month:02}-{DAYS_IN_MONTH[month - 1]}T00:00:00.000Z and Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'tileId' and att/OData.CSC.StringAttribute/Value eq '{tile}') and contains(Name,'L2A') and Attributes/OData.CSC.DoubleAttribute/any(att:att/Name eq 'cloudCover' and att/OData.CSC.DoubleAttribute/Value le {maxCloudCover})&$top=1000&$expand=Attributes"
 
     data = urllib3.request("GET", queryURL, timeout=30).json()
 
