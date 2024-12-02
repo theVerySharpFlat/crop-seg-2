@@ -10,7 +10,7 @@ do
         ./buildProductLevelVRT.sh $product
     done
 
-    vrts=$(find $dir -name "*-EPSG4326.vrt" -type f | sed "s/\n/ /g")
+    vrts=$(find $dir -name "*-EPSG3857.vrt" -type f | sed "s/\n/ /g")
 
     gdalbuildvrt -overwrite "$dir/product.vrt" $vrts
 done
