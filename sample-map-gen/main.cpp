@@ -153,9 +153,12 @@ int main(int argc, const char **argv) {
   joinMasks(masks, detfooMasks.size(), cldMask, args.cldProbMax, snwMask,
             args.snwProbMax, outMask, dsXSize, dsYSize);
 
-  GDALDriver *cogDriver = GDALDriver::FromHandle(GDALGetDriverByName("COG"));
+  GDALDriver *gtiffDriver = GDALDriver::FromHandle(GDALGetDriverByName("GTiff"));
   GDALDataset *outDS =
-      cogDriver->CreateCopy("out.tif", detfooMasks[0], FALSE, NULL, NULL, NULL);
+      gtiffDriver->Create("out.tif", dsXSize, dsYSize, 1, GDT_Byte, NULL);
+  // GDALDataset *outDS =
+  //     cogDriver->CreateCopy("out.tif", detfooMasks[0], FALSE, NULL, NULL,
+  //     NULL);
 
   std::cout << "size: " << outDS->GetRasterXSize() << ", "
             << outDS->GetRasterYSize() << std::endl;
@@ -165,11 +168,6 @@ int main(int argc, const char **argv) {
 
   if (err) {
     std::cout << "GDAL Error: " << err << std::endl;
-    exit(EXIT_FAILURE);
-  }
-  err = outDS->FlushCache();
-  if (err) {
-    std::cout << "GDAL flush error: " << err << std::endl;
     exit(EXIT_FAILURE);
   }
 
