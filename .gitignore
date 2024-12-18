@@ -167,3 +167,10 @@ data-l1/
 
 # build directories
 build/
+*.zip
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.xml
+*.vrt
