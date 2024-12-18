@@ -2,6 +2,7 @@
 #include <cpl_conv.h>
 #include <cpl_error.h>
 #include <cstddef>
+#include <cstdlib>
 #include <execution>
 #include <future>
 #include <gdal.h>
@@ -11,90 +12,175 @@
 #include <gdal_utils.h>
 
 #include "cuda/mapgen.h"
+#include "cuda/maskJoin.h"
 #include <cuda_runtime.h>
+#include <unordered_set>
 
-void readBand(int bandNum, GDALDataset *dsPtr, int dsXSize, int dsYSize,
-              float *bandData) {}
+#include "third_party/argparse.hpp"
+
+// 1. Build valid pixel masks from warped DETFOO masks
+// 2. Run buildSampleMask on resulting map taking in warped cloud and snow/ice
+// probability
+
+struct Args : public argparse::Args {
+  size_t &sampleDim =
+      kwarg("sd,sample-dim", "Dimension of box to sample").set_default(256);
+  std::vector<std::string> &detfooMasks =
+      kwarg("dfm,detfoo-masks", "The list of detector footprint masks to use")
+          .multi_argument();
+  std::string &cldMask =
+      kwarg("cld,cloud-mask", "The path to the cloud probability mask to use");
+  std::string &snwMask =
+      kwarg("snw,snow-mask", "The path to the snow probability mask to use");
+  uint8_t &snwProbMax = kwarg("snwm,snow-max", "The maximum snow probability");
+  uint8_t &cldProbMax =
+      kwarg("cldm,cloud-max", "The maximum cloud probability");
+};
 
 int main(int argc, const char **argv) {
+  auto args = argparse::parse<Args>(argc, argv);
+
   GDALAllRegister();
-  GDALDatasetUniquePtr dsPtr = GDALDatasetUniquePtr(
-      GDALDataset::FromHandle(GDALDataset::Open(argv[1], GDAL_OF_RASTER)));
 
-  int bboxSize = 256;
+  std::vector<GDALDataset *> detfooMasks;
+  for (const auto &maskPath : args.detfooMasks) {
+    std::cout << "opening " << std::filesystem::path(maskPath) << std::endl;
+    detfooMasks.push_back(GDALDataset::Open(maskPath.c_str(), GA_ReadOnly));
 
-  size_t dsXSize = dsPtr->GetRasterXSize();
-  size_t dsYSize = dsPtr->GetRasterYSize();
-
-  std::cout << "dataset is " << dsXSize << "x" << dsYSize << std::endl;
-  dsXSize /= 2;
-  dsYSize /= 2;
-
-  float *bandData = (float *)malloc(sizeof(float) * dsXSize * dsYSize * 10);
-  std::cout << "CPLMalloc: " << sizeof(float) * dsXSize * dsYSize * 10
-            << std::endl;
-
-  std::cout << "band data addr: " << bandData << std::endl;
-
-  std::vector<std::thread> readThreads;
-  for (int bandNum = 1; bandNum <= 10; bandNum++) {
-    std::cout << "reading band " << bandNum << std::endl;
-    GDALRasterBand *pBand = dsPtr->GetRasterBand(bandNum);
-
-    float *endPtr = bandData + 10 * dsXSize * dsYSize;
-    std::cout << "dsSize: " << dsXSize << ", " << dsYSize << std::endl;
-    std::cout << "band size: " << pBand->GetXSize() / 4 << ", "
-              << pBand->GetYSize() / 4 << std::endl;
-    CPLErr e = pBand->ReadRaster(bandData + (dsXSize * dsYSize) * (bandNum - 1),
-                                 dsXSize * dsYSize, 0, 0, dsXSize, dsYSize);
-
-    if (e) {
-      std::cout << "read band " << bandNum << " error: " << e << std::endl;
-      return 1;
+    if (!detfooMasks.back()) {
+      std::cout << "Failed to open \"" << maskPath << "\"" << std::endl;
+      exit(EXIT_FAILURE);
     }
-    std::cout << "finished reading band " << bandNum << std::endl;
   }
 
-  for (std::thread &thread : readThreads) {
-    thread.join();
+  size_t dsXSize = 0, dsYSize = 0;
+  for (const auto &ds : detfooMasks) {
+    size_t newXSize = ds->GetRasterXSize(), newYSize = ds->GetRasterYSize();
+
+    std::cout << newXSize << ", " << newYSize << std::endl;
+
+    size_t maxX = std::max(newXSize, dsXSize);
+    size_t minX = std::min(newXSize, dsXSize);
+
+    size_t maxY = std::max(newYSize, dsYSize);
+    size_t minY = std::min(newYSize, dsYSize);
+
+    if (minX && maxX % minX) {
+      std::cout << "dataset x dimension " << minX << " is not a factor of "
+                << maxX << std::endl;
+      return EXIT_FAILURE;
+    }
+
+    if (minY && maxY % minY) {
+      std::cout << "dataset y dimension " << minY << " is not a factor of "
+                << maxY << std::endl;
+      return EXIT_FAILURE;
+    }
+
+    dsXSize = maxX;
+    dsYSize = maxY;
   }
 
-  std::cout << "running kernel..." << std::endl;
+  std::cout << "ds size: " << dsXSize << ", " << dsYSize << std::endl;
 
-  buildSampleMap((float ***)bandData, nullptr, dsXSize, dsYSize, 10, bboxSize);
+  unsigned char *masks = (unsigned char *)malloc(
+      sizeof(unsigned char) * dsXSize * dsYSize * detfooMasks.size());
 
-  free(bandData);
+  for (size_t i = 0; i < detfooMasks.size(); i++) {
+    const auto &ds = detfooMasks[i];
 
-  // // clang-format off
-  // const char *args[] = {
-  //     "-b", "1",
-  //     "-b", "2",
-  //     "-b", "3",
-  //     "-b", "4",
-  //     "-b", "5",
-  //     "-b", "6",
-  //     "-b", "7",
-  //     "-b", "8",
-  //     "-b", "9",
-  //     "-b", "10",
-  //     NULL,
-  // };
-  // // clang-format on
-  //
-  // // sus
-  // GDALFootprintOptions *footprintOptions =
-  //     GDALFootprintOptionsNew((char **)args, NULL);
-  //
-  // int error = 0;
-  // GDALDatasetUniquePtr vecDSPtr =
-  // GDALDatasetUniquePtr(GDALDataset::FromHandle(
-  //     ((GDALDriver *)(GDALGetDriverByName("GeoJSON")))
-  //         ->Create("bruh", 0, 0, 0, GDT_Unknown, NULL)));
-  // GDALFootprint(NULL, vecDSPtr.get(), dsPtr.get(), footprintOptions, &error);
-  //
-  // if (error) {
-  //   std::cout << "error: " << error << std::endl;
-  // }
-  //
-  // GDALFootprintOptionsFree(footprintOptions);
+    std::cout << "read: " << i << std::endl;
+
+    CPLErr readErr = ds->GetRasterBand(1)->RasterIO(
+        GDALRWFlag::GF_Read, 0, 0, ds->GetRasterXSize(), ds->GetRasterYSize(),
+        masks + i * dsXSize * dsYSize * sizeof(unsigned char), dsXSize, dsYSize,
+        GDALDataType::GDT_Byte, 0, 0);
+
+    if (readErr) {
+      std::cout << "readErr: " << readErr << std::endl;
+    }
+  }
+
+  unsigned char *cldMask =
+      (unsigned char *)malloc(sizeof(unsigned char) * dsXSize * dsYSize);
+  {
+    auto dsPtr = GDALDatasetUniquePtr(
+        GDALDataset::Open(args.cldMask.c_str(), GA_ReadOnly));
+
+    std::cout << "dsPtr: " << dsPtr.get() << std::endl;
+    if (!dsPtr) {
+      std::cout << "Failed to open \"" << args.cldMask << "\"" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+
+    CPLErr readErr = dsPtr->GetRasterBand(1)->RasterIO(
+        GDALRWFlag::GF_Read, 0, 0, dsPtr->GetRasterXSize(),
+        dsPtr->GetRasterYSize(), cldMask, dsXSize, dsYSize,
+        GDALDataType::GDT_Byte, 0, 0);
+
+    if (readErr) {
+      std::cout << "Failed to read \"" << args.cldMask << "\"" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  unsigned char *snwMask =
+      (unsigned char *)malloc(sizeof(unsigned char) * dsXSize * dsYSize);
+  {
+    auto dsPtr = GDALDatasetUniquePtr(
+        GDALDataset::Open(args.snwMask.c_str(), GA_ReadOnly));
+    std::cout << "dsPtr: " << dsPtr.get() << std::endl;
+
+    if (!dsPtr) {
+      std::cout << "Failed to open \"" << args.snwMask << "\"" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+
+    CPLErr readErr = dsPtr->GetRasterBand(1)->RasterIO(
+        GDALRWFlag::GF_Read, 0, 0, dsPtr->GetRasterXSize(),
+        dsPtr->GetRasterYSize(), snwMask, dsXSize, dsYSize,
+        GDALDataType::GDT_Byte, 0, 0);
+
+    if (readErr) {
+      std::cout << "Failed to read \"" << args.snwMask << "\"" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  unsigned char *outMask =
+      (unsigned char *)malloc(sizeof(unsigned char) * dsXSize * dsYSize);
+  // joinDetfooMasks(masks, outMask, dsXSize, dsYSize, detfooMasks.size());
+  joinMasks(masks, detfooMasks.size(), cldMask, args.cldProbMax, snwMask,
+            args.snwProbMax, outMask, dsXSize, dsYSize);
+
+  GDALDriver *cogDriver = GDALDriver::FromHandle(GDALGetDriverByName("COG"));
+  GDALDataset *outDS =
+      cogDriver->CreateCopy("out.tif", detfooMasks[0], FALSE, NULL, NULL, NULL);
+
+  std::cout << "size: " << outDS->GetRasterXSize() << ", "
+            << outDS->GetRasterYSize() << std::endl;
+  CPLErr err = outDS->GetRasterBand(1)->RasterIO(
+      GF_Write, 0, 0, outDS->GetRasterXSize(), outDS->GetRasterYSize(),
+      (void *)outMask, dsXSize, dsYSize, GDALDataType::GDT_Byte, 0, 0);
+
+  if (err) {
+    std::cout << "GDAL Error: " << err << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  err = outDS->FlushCache();
+  if (err) {
+    std::cout << "GDAL flush error: " << err << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  outDS->Close();
+
+  std::unordered_set<unsigned char> vals;
+  for (size_t i = 0; i < dsXSize * dsYSize; i++) {
+    vals.insert(outMask[i]);
+  }
+
+  for (const auto &val : vals) {
+    std::cout << "val: " << (int)val << std::endl;
+  }
 }
