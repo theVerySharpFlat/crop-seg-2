@@ -62,7 +62,7 @@ buildSampleMask() {
 
     local vrtFname=$BUILD_DIR/$(basename $(echo $PRODUCT_ZIP | sed "s/.zip/-MSK.vrt/g"))
     (set -x; gdalbuildvrt -resolution user -tr 20 20 -overwrite -separate $vrtFname $DETFOO_MASKS $CLD_MASK $SNW_MASK)
-    (set -x; gdal_translate -tr 20 20 -co COMPRESS=ZSTD -co ZSTD_LEVEL=15 -co PREDICTOR=2 -co NUM_THREADS=1 -co TILED=YES $vrtFname $BUILD_DIR/$(basename $(echo $PRODUCT_ZIP | sed "s/.zip/-MSK.tif/g")))
+    (set -x; gdal_translate -tr 20 20 -co COMPRESS=ZSTD -co ZSTD_LEVEL=15 -co PREDICTOR=2 -co NUM_THREADS=1 -co TILED=NO $vrtFname $BUILD_DIR/$(basename $(echo $PRODUCT_ZIP | sed "s/.zip/-MSK.tif/g")))
 
     # (set -x; ./sample-map-gen/build/satsample_mapgen --dfm $DETFOO_MASKS --cld $CLD_MASK --snw $SNW_MASK --snwm 50 --cldm 50 -o $BUILD_DIR/MSK_OK.tiff)
 }

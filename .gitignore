@@ -174,3 +174,4 @@ build/
 *.tif
 *.xml
 *.vrt
+.clangd

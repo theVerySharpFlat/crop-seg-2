@@ -35,6 +35,8 @@ struct Args : public argparse::Args {
   uint8_t &snwProbMax = kwarg("snwm,snow-max", "The maximum snow probability");
   uint8_t &cldProbMax =
       kwarg("cldm,cloud-max", "The maximum cloud probability");
+
+  std::string &outFile = kwarg("o,out", "output file");
 };
 
 int main(int argc, const char **argv) {
@@ -153,9 +155,10 @@ int main(int argc, const char **argv) {
   joinMasks(masks, detfooMasks.size(), cldMask, args.cldProbMax, snwMask,
             args.snwProbMax, outMask, dsXSize, dsYSize);
 
-  GDALDriver *gtiffDriver = GDALDriver::FromHandle(GDALGetDriverByName("GTiff"));
-  GDALDataset *outDS =
-      gtiffDriver->Create("out.tif", dsXSize, dsYSize, 1, GDT_Byte, NULL);
+  GDALDriver *gtiffDriver =
+      GDALDriver::FromHandle(GDALGetDriverByName("GTiff"));
+  GDALDataset *outDS = gtiffDriver->Create(args.outFile.c_str(), dsXSize,
+                                           dsYSize, 1, GDT_Byte, NULL);
   // GDALDataset *outDS =
   //     cogDriver->CreateCopy("out.tif", detfooMasks[0], FALSE, NULL, NULL,
   //     NULL);
@@ -172,13 +175,4 @@ int main(int argc, const char **argv) {
   }
 
   outDS->Close();
-
-  std::unordered_set<unsigned char> vals;
-  for (size_t i = 0; i < dsXSize * dsYSize; i++) {
-    vals.insert(outMask[i]);
-  }
-
-  for (const auto &val : vals) {
-    std::cout << "val: " << (int)val << std::endl;
-  }
 }
