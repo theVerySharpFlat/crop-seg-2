@@ -1,10 +1,8 @@
 #pragma once
-//
-// void buildSampleMap(float ***bands, int **out, int bandDimX, int bandDimY,
-//                     int nBands, int sampleSize);
-//
+
 #include <cstddef>
-namespace sats::cudaproc {
+
+namespace sats::cpuproc {
 
 void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                        unsigned char *cldMask, unsigned char maxCldPercentage,

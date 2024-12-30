@@ -1,5 +1,7 @@
 #include "sampler.h"
+#include "cpu/mapgen.h"
 #include "cuda/mapgen.h"
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
@@ -70,10 +72,12 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
       auto [val, err] =
           genCache(std::filesystem::canonical(path), cacheGenOptions);
 
-      if (!val) {
+      if (!val.has_value()) {
         std::cout << "load error: " << err << std::endl;
       } else {
         std::cout << "nOK: " << val->nOK << std::endl;
+        std::cout << "xDim, yDim: " << val->nCols << " " << val->nRows
+                  << std::endl;
       }
     }
   }
@@ -139,13 +143,26 @@ Sampler::genCache(const std::filesystem::path &path,
                                        ds->GetRasterYSize());
 
   size_t nPixels = ds->GetRasterXSize() * ds->GetRasterYSize();
-  generateSampleMap((unsigned char *)bands, nBands - 2,
-                    (unsigned char *)((char *)bands + cldIdx * nPixels),
-                    cacheGenOptions.cldMax,
-                    (unsigned char *)((char *)bands + snwIdx * nPixels),
-                    cacheGenOptions.snwMax, (unsigned char *)stage,
-                    ds->GetRasterXSize(), ds->GetRasterYSize(),
-                    cacheGenOptions.sampleDim, cacheGenOptions.minOKPercentage);
+
+#ifdef HAS_CUDA
+  cudaproc::generateSampleMap(
+      (unsigned char *)bands, nBands - 2,
+      (unsigned char *)((char *)bands + cldIdx * nPixels),
+      cacheGenOptions.cldMax,
+      (unsigned char *)((char *)bands + snwIdx * nPixels),
+      cacheGenOptions.snwMax, (unsigned char *)stage, ds->GetRasterXSize(),
+      ds->GetRasterYSize(), cacheGenOptions.sampleDim,
+      cacheGenOptions.minOKPercentage);
+#else
+  cpuproc::generateSampleMap(
+      (unsigned char *)bands, nBands - 2,
+      (unsigned char *)((char *)bands + cldIdx * nPixels),
+      cacheGenOptions.cldMax,
+      (unsigned char *)((char *)bands + snwIdx * nPixels),
+      cacheGenOptions.snwMax, (unsigned char *)stage, ds->GetRasterXSize(),
+      ds->GetRasterYSize(), cacheGenOptions.sampleDim,
+      cacheGenOptions.minOKPercentage);
+#endif
 
   size_t nPixelsCondensed =
       (nPixels / sizeof(uint8_t)) + (nPixels % sizeof(uint8_t) != 0);
@@ -177,7 +194,10 @@ Sampler::genCache(const std::filesystem::path &path,
       .nCols = (size_t)ds->GetRasterXSize(),
   };
 
-  return std::make_pair(cache, "");
+  auto ret = std::make_pair(SampleCache{}, "");
+  ret.first = cache;
+
+  return ret;
 };
 
 // return std::make_pair(, "");

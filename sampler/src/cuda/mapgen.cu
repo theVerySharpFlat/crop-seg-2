@@ -149,6 +149,7 @@ __global__ void BuildSampleMap(int *rowSums, size_t rowSums_pitch,
 //   gpuErrchk(cudaPeekAtLastError());
 // }
 
+namespace sats::cudaproc {
 void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                        unsigned char *cldMask, unsigned char maxCldPercentage,
                        unsigned char *snwMask, unsigned char maxSnwPercentage,
@@ -267,3 +268,4 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
   gpuErrchkPassthrough(cudaFree(d_rowSums));
   gpuErrchkPassthrough(cudaFree(d_outPtr.ptr));
 }
+} // namespace sats::cuda
