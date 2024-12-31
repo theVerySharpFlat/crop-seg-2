@@ -27,14 +27,17 @@ __global__ void BuildRowNonzeroSums(cudaPitchedPtr bands, int *out,
   int r = blockDim.x * blockIdx.x + threadIdx.x;
   int c = blockDim.y * blockIdx.y + threadIdx.y;
 
-  if (c > bandDimX - sampleSize || r > bandDimY - sampleSize) {
-    return;
-  }
-
   int pitch = bands.pitch;
   int slicePitch = bands.pitch * bandDimY;
 
-  int *outRow = (int *)((char *)out + pitch * r);
+  int *outRow = (int *)((char *)out + out_pitch * r);
+
+  if ((c > bandDimX - sampleSize) || (r > bandDimY - sampleSize)) {
+    if (c < bandDimX && r < bandDimY) {
+      outRow[c] = 0;
+    }
+    return;
+  }
   outRow[c] = 0;
 
   for (int band = 0; band < nBands; band++) {
@@ -65,11 +68,14 @@ __global__ void BuildSampleMap(int *rowSums, size_t rowSums_pitch,
   int r = blockDim.x * blockIdx.x + threadIdx.x;
   int c = blockDim.y * blockIdx.y + threadIdx.y;
 
-  if (c > bandDimX - sampleSize || r > bandDimY - sampleSize) {
+  unsigned char *outRow = (unsigned char *)(out + out_pitch * r);
+  if ((c > (bandDimX - sampleSize)) || (r > (bandDimY - sampleSize))) {
+    if (c < bandDimX && r < bandDimY) {
+      outRow[c] = 0;
+    }
     return;
   }
 
-  unsigned char *outRow = (unsigned char *)(out + out_pitch * r);
   outRow[c] = 0;
 
   size_t total = 0;
@@ -268,4 +274,4 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
   gpuErrchkPassthrough(cudaFree(d_rowSums));
   gpuErrchkPassthrough(cudaFree(d_outPtr.ptr));
 }
-} // namespace sats::cuda
+} // namespace sats::cudaproc

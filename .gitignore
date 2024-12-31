@@ -175,3 +175,6 @@ build/
 *.xml
 *.vrt
 .clangd
+
+valgrind*
+compile_commands.json

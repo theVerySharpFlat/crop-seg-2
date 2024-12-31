@@ -11,10 +11,10 @@ find_package(CUDAToolkit)
 
 add_library(satsample src/sampler.cpp src/cpu/mapgen.cpp)
 
-if (CUDA_FOUND)
+if (CUDAToolkit_FOUND)
     enable_language(CUDA)
-    target_sources(satsample src/cuda/mapgen.cu src/cuda/maskJoin.cu)
-    target_compile_definitions(satsample HAS_CUDA)
+    target_sources(satsample PRIVATE src/cuda/mapgen.cu src/cuda/maskJoin.cu)
+    target_compile_definitions(satsample PRIVATE HAS_CUDA)
     target_link_libraries(satsample PUBLIC CUDA::cudart)
 endif()
 

@@ -1,6 +1,7 @@
 #include "sampler.h"
 #include "cpu/mapgen.h"
 #include "cuda/mapgen.h"
+#include "signal.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -90,7 +91,9 @@ Sampler::genCache(const std::filesystem::path &path,
   std::smatch subMatch;
 
   std::string fname = path.filename().string();
-  assert(std::regex_search(fname, subMatch, subRe));
+  if (!std::regex_search(fname, subMatch, subRe)) {
+    raise(SIGTRAP);
+  }
 
   std::filesystem::path mskProductPath =
       path / std::filesystem::path(subMatch.str() + "-MSK.tif");
@@ -144,7 +147,7 @@ Sampler::genCache(const std::filesystem::path &path,
 
   size_t nPixels = ds->GetRasterXSize() * ds->GetRasterYSize();
 
-#ifdef HAS_CUDA
+#if HAS_CUDA
   cudaproc::generateSampleMap(
       (unsigned char *)bands, nBands - 2,
       (unsigned char *)((char *)bands + cldIdx * nPixels),
