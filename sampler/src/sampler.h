@@ -31,6 +31,8 @@ public:
   Sampler(const std::filesystem::path &path, SampleCacheGenOptions options,
           std::optional<DateRange> dateRange, bool preproc = true);
 
+  std::vector<float *> randomSample();
+
 private:
   struct SampleCache {
     uint8_t *bitrange;
@@ -46,7 +48,10 @@ private:
     std::filesystem::path path;
 
     size_t year, month, day;
+    std::string productName;
     std::string tileName;
+
+    size_t maxDimX, maxDimY;
 
     std::optional<SampleCache> cache;
   };
@@ -54,7 +59,7 @@ private:
   std::vector<SampleInfo> infos;
 
   std::pair<std::optional<SampleCache>, std::string>
-  genCache(const std::filesystem::path &path, SampleCacheGenOptions genOptions);
+  genCache(const SampleInfo &info, SampleCacheGenOptions genOptions);
 
   SampleCacheGenOptions cacheGenOptions;
 };

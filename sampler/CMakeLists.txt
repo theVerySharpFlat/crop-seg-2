@@ -9,17 +9,20 @@ endif()
 
 find_package(CUDAToolkit)
 
-add_library(satsample src/sampler.cpp src/cpu/mapgen.cpp)
+add_library(satsample src/sampler.cpp src/cpu/mapgen.cpp src/cdlCache.cpp)
 
 if (CUDAToolkit_FOUND)
     enable_language(CUDA)
     target_sources(satsample PRIVATE src/cuda/mapgen.cu src/cuda/maskJoin.cu)
     target_compile_definitions(satsample PRIVATE HAS_CUDA)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -default-stream per-thread")
     target_link_libraries(satsample PUBLIC CUDA::cudart)
 endif()
 
+find_package(OpenMP REQUIRED)
+
 target_compile_features(satsample PUBLIC cxx_std_20)
-target_link_libraries(satsample PUBLIC GDAL::GDAL)
+target_link_libraries(satsample PUBLIC GDAL::GDAL OpenMP::OpenMP_CXX)
 target_include_directories(satsample PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_executable(sandbox sandbox/main.cpp)

@@ -19,18 +19,19 @@ public:
   };
 
   uint8_t *read(const std::filesystem::path &path,
-                const OGRSpatialReference *srs, ProjWin projWin, size_t* oDimX, size_t* oDimY);
+                const OGRSpatialReference *srs, ProjWin projWin, size_t *oDimX,
+                size_t *oDimY);
 
 private:
-  struct PathEqual {
-    constexpr bool operator()(const std::filesystem::path &a,
-                              const std::filesystem::path &b) {
-      return std::filesystem::equivalent(a, b);
-    }
-  };
-
-  std::unordered_map<std::filesystem::path, GDALDataset *,
-                     std::hash<std::filesystem::path>, PathEqual>
-      filemap;
+  // struct PathEqual {
+  //   constexpr bool operator()(const std::filesystem::path &a,
+  //                             const std::filesystem::path &b) {
+  //     return std::filesystem::equivalent(a, b);
+  //   }
+  // };
+  //
+  // std::unordered_map<std::filesystem::path, GDALDataset *,
+  //                    std::hash<std::filesystem::path>, PathEqual>
+  //     filemap;
 };
 } // namespace sats

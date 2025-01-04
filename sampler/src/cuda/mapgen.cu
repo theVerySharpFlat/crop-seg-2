@@ -199,7 +199,7 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
 
   JoinUCharMasks<<<blocksPerGrid, threadsPerBlock>>>(
       d_detfooMasksPtr, d_outPtr, bandDimX, bandDimY, nDetfooMasks);
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
 
   gpuErrchkPassthrough(cudaFree(d_detfooMasksPtr.ptr));
@@ -217,7 +217,7 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                          cudaMemcpyHostToDevice));
   JoinUCharMasks<<<blocksPerGrid, threadsPerBlock>>>(
       d_cldMaskPtr, d_outPtr, bandDimX, bandDimY, 1, 0, maxCldPercentage);
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
   // join snw mask
   cudaPitchedPtr d_snwMaskPtr = {};
@@ -232,7 +232,7 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                          cudaMemcpyHostToDevice));
   JoinUCharMasks<<<blocksPerGrid, threadsPerBlock>>>(
       d_snwMaskPtr, d_outPtr, bandDimX, bandDimY, 1, 0, maxSnwPercentage);
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
   gpuErrchkPassthrough(cudaFree(d_snwMaskPtr.ptr));
 
@@ -251,7 +251,7 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
 
   BuildRowNonzeroSums<<<blocksPerGrid, threadsPerBlock>>>(
       d_outPtr, d_rowSums, d_rowSums_pitch, bandDimX, bandDimY, 1, sampleSize);
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
 
   // std::cout << "finished a" << std::endl;
@@ -261,7 +261,7 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
       bandDimX, bandDimY, sampleSize, minNonzeroPercentage);
   gpuErrchk(cudaPeekAtLastError());
 
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
   // std::cout << "finished" << std::endl;
 
