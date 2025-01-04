@@ -198,7 +198,7 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
   for (int i = 0; i < infos.size(); i++) {
     auto &info = infos[i];
     if (preproc) {
-      auto [val, err] = genCache(infos.back(), cacheGenOptions);
+      auto [val, err] = genCache(info, cacheGenOptions);
 
       std::cout << info.path << std::endl;
       if (!val.has_value()) {
@@ -278,7 +278,7 @@ Sampler::genCache(const SampleInfo &info,
 
   size_t nPixels = ds->GetRasterXSize() * ds->GetRasterYSize();
 
-#if HAS_CUDA
+#if 0 && HAS_CUDA
   cudaproc::generateSampleMap(
       (unsigned char *)bands, nBands - 2,
       (unsigned char *)((char *)bands + cldIdx * nPixels),
