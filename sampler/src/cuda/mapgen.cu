@@ -1,6 +1,8 @@
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cuda_runtime_api.h>
+#include <driver_types.h>
 #include <iostream>
 
 #include "cuda/mapgen.h"
@@ -61,10 +63,44 @@ __global__ void BuildRowNonzeroSums(cudaPitchedPtr bands, int *out,
   // }
 }
 
-__global__ void BuildSampleMap(int *rowSums, size_t rowSums_pitch,
-                               unsigned char *out, size_t out_pitch,
+__global__ void BuildSampleMap(cudaPitchedPtr bands, cudaPitchedPtr outPtr,
                                int bandDimX, int bandDimY, int sampleSize,
                                float minNonzeroPercentage) {
+  int r = blockDim.x * blockIdx.x + threadIdx.x;
+  int c = blockDim.y * blockIdx.y + threadIdx.y;
+
+  unsigned char *outRow =
+      (unsigned char *)((char *)outPtr.ptr + outPtr.pitch * r);
+  if ((c > (bandDimX - sampleSize)) || (r > (bandDimY - sampleSize))) {
+    if (c < bandDimX && r < bandDimY) {
+      outRow[c] = 0;
+    }
+    return;
+  }
+
+  outRow[c] = 0;
+
+  size_t total = 0;
+
+  for (int k = r; k < r + sampleSize; k++) {
+    for (int l = c; l < c + sampleSize; l++) {
+      char *rowSumsRow = ((char *)bands.ptr + bands.pitch * k);
+
+      total += (rowSumsRow[l] != 0);
+    }
+  }
+
+  float percentage = (float)total / sampleSize / sampleSize;
+
+  if (percentage > minNonzeroPercentage) {
+    outRow[c] = 1;
+  }
+}
+
+__global__ void BuildSampleMap2(int *rowSums, size_t rowSums_pitch,
+                                unsigned char *out, size_t out_pitch,
+                                int bandDimX, int bandDimY, int sampleSize,
+                                float minNonzeroPercentage) {
   int r = blockDim.x * blockIdx.x + threadIdx.x;
   int c = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -91,6 +127,74 @@ __global__ void BuildSampleMap(int *rowSums, size_t rowSums_pitch,
   if (percentage > minNonzeroPercentage) {
     outRow[c] = 1;
   }
+}
+
+__global__ void BuildSampleMap_RowSums(const cudaPitchedPtr in,
+                                       cudaPitchedPtr out, int bandDimX,
+                                       int bandDimY, int sampleSize) {
+  size_t r = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (r >= bandDimY) {
+    return;
+  }
+
+  const unsigned char *readRow = (unsigned char *)in.ptr + in.pitch * r;
+  uint32_t *writeRow = (uint32_t *)((char *)out.ptr + out.pitch * r);
+
+  writeRow[0] = 0;
+  for (int i = 0; i < sampleSize; i++) {
+    writeRow[0] += (readRow[i] != 0);
+  }
+
+  for (int i = 1; i < bandDimX - sampleSize; i++) {
+    writeRow[i] = writeRow[i - 1] - (readRow[i - 1] != 0) +
+                  (readRow[i - 1 + sampleSize] != 0);
+  }
+
+  for (int i = bandDimX - sampleSize; i < bandDimX; i++) {
+    writeRow[i] = 0;
+  }
+}
+
+__global__ void BuildSampleMap_ColSums(const cudaPitchedPtr in,
+                                       cudaPitchedPtr out, int bandDimX,
+                                       int bandDimY, int sampleSize,
+                                       float minNonzeroPercentage) {
+  size_t c = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (c >= bandDimX - sampleSize) {
+    return;
+  }
+
+  size_t total = 0;
+  unsigned char *writeRow = (unsigned char *)out.ptr;
+  for (int i = 0; i < sampleSize; i++) {
+    const uint32_t *readRow = (uint32_t *)((char *)in.ptr + in.pitch * i);
+    total += readRow[c];
+  }
+
+  writeRow[c] =
+      (((float)total / sampleSize / sampleSize) > minNonzeroPercentage);
+
+  for (int i = 1; i < bandDimY - sampleSize; i++) {
+    const uint32_t *prevReadRow =
+        (uint32_t *)((char *)in.ptr + in.pitch * (i - 1));
+
+    const uint32_t *nextReadRow =
+        (uint32_t *)((char *)in.ptr + in.pitch * (i - 1 + sampleSize));
+
+    writeRow = (unsigned char *)out.ptr + out.pitch * i;
+
+    total = total - prevReadRow[c] + nextReadRow[c];
+
+    writeRow[c] =
+        (((float)total / sampleSize / sampleSize) > minNonzeroPercentage);
+  }
+
+  // for (int i = bandDimY - sampleSize; i < bandDimY; i++) {
+  //   writeRow = (unsigned char *)out.ptr + out.pitch * i;
+  //   writeRow[c] = 0;
+  // }
 }
 
 // void buildSampleMap(float ***bands, int **out, int bandDimX, int bandDimY,
@@ -244,26 +348,44 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
   // threadDim),
   //                    bandDimY / threadDim + (threadDim - bandDimY %
   //                    threadDim));
-  int *d_rowSums;
-  size_t d_rowSums_pitch;
-  gpuErrchk(cudaMallocPitch(&d_rowSums, &d_rowSums_pitch,
-                            bandDimX * (sizeof(int)), bandDimY));
+  // int *d_rowSums;
+  // size_t d_rowSums_pitch;
+  cudaPitchedPtr d_intermediatePtr;
+  gpuErrchk(cudaMallocPitch(&d_intermediatePtr.ptr, &d_intermediatePtr.pitch,
+                            bandDimX * sizeof(uint32_t), bandDimY));
+  gpuErrchk(cudaMemset2D(d_intermediatePtr.ptr, d_intermediatePtr.pitch, 0,
+                         bandDimX * sizeof(uint32_t), bandDimY));
+  // gpuErrchk(cudaMemcpy2D(joinedCopy.ptr, joinedCopy.pitch, d_outPtr.ptr,
+  //                        d_outPtr.pitch, bandDimX, bandDimY,
+  //                        cudaMemcpyDeviceToDevice));
 
-  BuildRowNonzeroSums<<<blocksPerGrid, threadsPerBlock>>>(
-      d_outPtr, d_rowSums, d_rowSums_pitch, bandDimX, bandDimY, 1, sampleSize);
-  cudaStreamSynchronize(0);
+  // BuildRowNonzeroSums<<<blocksPerGrid, threadsPerBlock>>>(
+  //     d_outPtr, d_rowSums, d_rowSums_pitch, bandDimX, bandDimY, 1,
+  //     sampleSize);
+  // cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
 
   // std::cout << "finished a" << std::endl;
 
-  BuildSampleMap<<<blocksPerGrid, threadsPerBlock>>>(
-      d_rowSums, d_rowSums_pitch, (unsigned char *)d_outPtr.ptr, d_outPtr.pitch,
-      bandDimX, bandDimY, sampleSize, minNonzeroPercentage);
+  size_t linearThreadsPerBlock = 128;
+  size_t linearNBlocks = (size_t)ceil((float)bandDimY / linearThreadsPerBlock);
+
+  BuildSampleMap_RowSums<<<linearNBlocks, linearThreadsPerBlock>>>(
+      d_outPtr, d_intermediatePtr, bandDimX, bandDimY, sampleSize);
   gpuErrchk(cudaPeekAtLastError());
 
   cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
   // std::cout << "finished" << std::endl;
+
+  linearNBlocks = (size_t)ceil((float)bandDimX / linearThreadsPerBlock);
+  gpuErrchk(cudaMemset2D(d_outPtr.ptr, d_outPtr.pitch, 0,
+                         bandDimX * sizeof(unsigned char), bandDimY));
+  BuildSampleMap_ColSums<<<linearNBlocks, linearThreadsPerBlock>>>(
+      d_intermediatePtr, d_outPtr, bandDimX, bandDimY, sampleSize,
+      minNonzeroPercentage);
+  cudaStreamSynchronize(0);
+  gpuErrchk(cudaPeekAtLastError());
 
   // copy result to host
   gpuErrchk(cudaMemcpy2D((void *)outMask, sizeof(unsigned char) * bandDimX,
@@ -271,7 +393,8 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                          bandDimX * sizeof(unsigned char), bandDimY,
                          cudaMemcpyKind::cudaMemcpyDeviceToHost));
 
-  gpuErrchkPassthrough(cudaFree(d_rowSums));
+  // gpuErrchkPassthrough(cudaFree(d_rowSums));
+  gpuErrchkPassthrough(cudaFree(d_intermediatePtr.ptr));
   gpuErrchkPassthrough(cudaFree(d_outPtr.ptr));
 }
 } // namespace sats::cudaproc

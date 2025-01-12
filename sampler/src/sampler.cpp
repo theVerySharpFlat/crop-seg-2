@@ -193,9 +193,9 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
   }
 
   omp_set_dynamic(0);
-  omp_set_num_threads(16);
+  omp_set_num_threads(8);
 #pragma omp parallel for
-  for (int i = 0; i < infos.size(); i++) {
+  for (int i = 0 + 1; i < infos.size(); i++) {
     auto &info = infos[i];
     if (preproc) {
       auto [val, err] = genCache(info, cacheGenOptions);
@@ -278,7 +278,7 @@ Sampler::genCache(const SampleInfo &info,
 
   size_t nPixels = ds->GetRasterXSize() * ds->GetRasterYSize();
 
-#if 0 && HAS_CUDA
+#if HAS_CUDA
   cudaproc::generateSampleMap(
       (unsigned char *)bands, nBands - 2,
       (unsigned char *)((char *)bands + cldIdx * nPixels),

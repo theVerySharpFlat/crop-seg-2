@@ -31,8 +31,7 @@ void mapgen(uint8_t *mask, size_t bandDimX, size_t bandDimY, size_t sampleSize,
   for (size_t r = 0; r < bandDimY; r++) {
     for (size_t c = 0; c < bandDimX; c++) {
 
-      if (r > bandDimY - sampleSize || c > bandDimX - sampleSize) {
-        // mask[r * bandDimX + c] = 0;
+      if (c >= bandDimX - sampleSize) {
         rowSums[r * bandDimX + c] = 0;
         continue;
       }
@@ -60,7 +59,7 @@ void mapgen(uint8_t *mask, size_t bandDimX, size_t bandDimY, size_t sampleSize,
     int prevTotal = 0;
     for (size_t r = 0; r < bandDimY; r++) {
 
-      if (r > bandDimY - sampleSize || c > bandDimX - sampleSize) {
+      if (r >= bandDimY - sampleSize || c >= bandDimX - sampleSize) {
         mask[r * bandDimX + c] = 0;
         // rowSums[r * bandDimX + c] = 0;
         continue;
@@ -81,7 +80,7 @@ void mapgen(uint8_t *mask, size_t bandDimX, size_t bandDimY, size_t sampleSize,
       prevTotal = total;
 
       mask[r * bandDimX + c] =
-          ((float)total / sampleSize / sampleSize > minNonzeroPercentage);
+          (((float)total / sampleSize / sampleSize) > minNonzeroPercentage);
       nOK += mask[r * bandDimX + c];
     }
 
