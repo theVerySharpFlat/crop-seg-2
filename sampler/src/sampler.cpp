@@ -72,7 +72,8 @@ static bool getProductDims(const std::filesystem::path &path,
               << std::endl;
   }
 
-  GDALDataset *ds = GDALDataset::Open(productPath.value().c_str());
+  GDALDataset *ds = GDALDataset::FromHandle(
+      GDALOpen(productPath.value().c_str(), GDALAccess::GA_ReadOnly));
 
   if (!ds) {
     std::cout << "could not open ds to get dims" << std::endl;
@@ -82,6 +83,8 @@ static bool getProductDims(const std::filesystem::path &path,
 
   *xDim = ds->GetRasterXSize();
   *yDim = ds->GetRasterYSize();
+
+  ds->Close();
 
   return true;
 }
@@ -195,7 +198,7 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
   omp_set_dynamic(0);
   omp_set_num_threads(8);
 #pragma omp parallel for
-  for (int i = 0 + 1; i < infos.size(); i++) {
+  for (int i = 0; i < infos.size(); i++) {
     auto &info = infos[i];
     if (preproc) {
       auto [val, err] = genCache(info, cacheGenOptions);
@@ -214,6 +217,61 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
   }
 }
 
+size_t Sampler::computeSampleIndex(size_t sampleOKIndex,
+                                   const SampleCache &cache) {
+  size_t sampleIndex = 0;
+  size_t currentCount = 0;
+  // std::cout << "sampleOKIndex: " << sampleOKIndex << std::endl;
+  for (size_t i = 0; i < cache.size / 8; i++) {
+    size_t cnt = std::popcount(((uint64_t *)cache.bitrange)[i]);
+
+    if (currentCount + cnt > (sampleOKIndex + 1)) {
+      // std::cout << "sample base: " << sampleIndex << std::endl;
+      // std::cout << "pre count: " << currentCount << std::endl;
+      // std::cout << "in question: "
+      //           << std::format("{:064b}", ((uint64_t *)cache.bitrange)[i])
+      //           << std::endl;
+      cnt = 0;
+      size_t j = 0;
+      for (; j < 64 && cnt < ((sampleOKIndex + 1) - currentCount); j++) {
+        cnt += (size_t)((bool)((1ul << (/* 63 -  */ j)) &
+                               ((((uint64_t *)cache.bitrange)[i]))));
+
+        // std::cout << "mask: "
+        //           << std::format(
+        //                  "{:064b}",
+        //                  ((1ul << j) & ((((uint64_t *)cache.bitrange)[i]))))
+        //           << std::endl;
+      }
+
+      // std::cout << "cnt: " << cnt << " " << sampleOKIndex + 1 - currentCount
+      //           << std::endl;
+      // std::cout << "j: " << j << std::endl;
+      assert(cnt == (sampleOKIndex + 1 - currentCount));
+
+      sampleIndex += j;
+      currentCount += cnt;
+      // break;
+    } else if (currentCount + cnt == (sampleOKIndex + 1)) {
+      currentCount += cnt;
+      assert(((uint64_t *)cache.bitrange)[i] != 0);
+      sampleIndex += 64 - __builtin_clzl(((uint64_t *)cache.bitrange)[i]);
+    } else {
+      currentCount += cnt;
+      sampleIndex += 64;
+    }
+
+    if (currentCount == (sampleOKIndex + 1)) {
+      break;
+    }
+  }
+
+  // std::cout << "currentCount: " << currentCount << std::endl;
+  // std::cout << "sampleIndex - 1: " << sampleIndex - 1 << std::endl;
+
+  return sampleIndex - 1;
+}
+
 std::pair<std::optional<Sampler::SampleCache>, std::string>
 Sampler::genCache(const SampleInfo &info,
                   Sampler::SampleCacheGenOptions genOptions) {
@@ -229,7 +287,8 @@ Sampler::genCache(const SampleInfo &info,
 
   GDALDataset *ds = GDALDataset::Open(
       ("vrt:///vsizip/" + mskProductPath.string() +
-       std::format("?outsize={},{}", info.maxDimX, info.maxDimY))
+       // std::format("?outsize={},{}", info.maxDimX, info.maxDimY))
+       "")
           .c_str());
 
   if (!ds) {
@@ -273,10 +332,12 @@ Sampler::genCache(const SampleInfo &info,
     }
   }
 
-  uint8_t **stage = (uint8_t **)malloc(sizeof(uint8_t) * ds->GetRasterXSize() *
-                                       ds->GetRasterYSize());
+  uint8_t *stage = (uint8_t *)malloc(sizeof(uint8_t) * ds->GetRasterXSize() *
+                                     ds->GetRasterYSize());
 
   size_t nPixels = ds->GetRasterXSize() * ds->GetRasterYSize();
+
+  size_t scalingFactor = info.maxDimX / ds->GetRasterXSize();
 
 #if HAS_CUDA
   cudaproc::generateSampleMap(
@@ -285,7 +346,7 @@ Sampler::genCache(const SampleInfo &info,
       cacheGenOptions.cldMax,
       (unsigned char *)((char *)bands + snwIdx * nPixels),
       cacheGenOptions.snwMax, (unsigned char *)stage, ds->GetRasterXSize(),
-      ds->GetRasterYSize(), cacheGenOptions.sampleDim,
+      ds->GetRasterYSize(), cacheGenOptions.sampleDim / scalingFactor,
       cacheGenOptions.minOKPercentage);
 #else
   cpuproc::generateSampleMap(
@@ -298,11 +359,7 @@ Sampler::genCache(const SampleInfo &info,
       cacheGenOptions.minOKPercentage);
 #endif
 
-  size_t nPixelsCondensed =
-      (nPixels / sizeof(uint8_t)) + (nPixels % sizeof(uint8_t) != 0);
-  // ensure 64 bit size multiple for iteration purposes
-  nPixelsCondensed = nPixelsCondensed + (64 - (nPixelsCondensed % 64)) *
-                                            (nPixelsCondensed % 64 != 0);
+  size_t nPixelsCondensed = (size_t)(std::ceil(nPixels / 64.0) * 8);
 
   uint8_t *condensed = (uint8_t *)malloc(nPixelsCondensed);
   // zero memory, could use calloc instead
@@ -310,10 +367,24 @@ Sampler::genCache(const SampleInfo &info,
 
   size_t okTotal = 0;
   for (size_t i = 0; i < nPixelsCondensed; i++) {
-    for (int j = 0; j < 8 && (i * 8 + j) < nPixels; j++) {
-      int ok = (((uint8_t *)stage)[i * 8 + j] != 0);
+    condensed[i] = 0;
+
+    // condensed[i] = (stage[i * 8]) != 0;
+
+    condensed[i] = 0;
+    for (int j = 0; j < 8 && ((i * 8 + j) < nPixels); j++) {
+      uint8_t ok = (((uint8_t *)stage)[i * 8 + j]) != 0;
+
+      if (((10980 / 2) - ((i * 8 + j) % (10980 / 2))) < 128) {
+        assert(!ok);
+      }
+
+      assert(ok == 1 || ok == 0);
+      assert(7 - j >= 0);
+      assert(j <= 7);
+
       okTotal += ok;
-      condensed[i] |= ok << j;
+      condensed[i] |= (ok << (j));
     }
   }
 
@@ -336,50 +407,87 @@ Sampler::genCache(const SampleInfo &info,
 };
 
 std::vector<float *> Sampler::randomSample() {
-  // need to revamp this
-  std::srand(time(NULL));
 
   int fileIndex = std::rand() % infos.size();
   const auto &info = infos[fileIndex];
 
-  int sampleOKIndex = std::rand() % info.cache->nOK;
+  size_t sampleOKIndex = std::rand() % info.cache->nOK;
 
   int sampleIndex = 0;
   {
-    int currentOKIndex = 0;
-    int currentWordIndex = 0;
-    while (currentOKIndex < sampleOKIndex) {
-      currentOKIndex +=
-          std::popcount(((uint64_t *)info.cache->bitrange)[currentWordIndex++]);
-    }
+    // size_t currentOKIndex = 0;
+    // size_t currentWordIndex = 0;
+    // while (currentOKIndex < sampleOKIndex) {
+    //   currentOKIndex +=
+    //       std::popcount(((uint64_t
+    //       *)info.cache->bitrange)[currentWordIndex++]);
+    // }
+    //
+    // if (currentOKIndex != sampleOKIndex) {
+    //   currentOKIndex -=
+    //       std::popcount(((uint64_t
+    //       *)info.cache->bitrange)[--currentWordIndex]);
+    //
+    //   size_t nthBit = sampleOKIndex - currentOKIndex;
+    //   assert(nthBit > 0);
+    //   assert(nthBit < 64);
+    //
+    //   size_t j = 0;
+    //   size_t i = 0;
+    //   while (i < 64 && j < nthBit) {
+    //     if (((uint64_t)1 << (64 - i - 1)) &
+    //         ((uint64_t *)info.cache->bitrange)[currentWordIndex]) {
+    //       j++;
+    //     }
+    //
+    //     i++;
+    //   }
+    //
+    //   assert(j == nthBit);
+    //   assert(i >= nthBit);
+    //
+    //   sampleIndex = currentWordIndex * sizeof(uint64_t) + i;
+    //   assert((10980 / 2) - (sampleIndex % (10980 / 2)) >= 128);
+    //   assert(sampleIndex > 0 &&
+    //          sampleIndex < (info.cache->nRows - cacheGenOptions.sampleDim) *
+    //                            (info.cache->nCols -
+    //                            cacheGenOptions.sampleDim));
+    // }
 
-    if (currentOKIndex != sampleOKIndex) {
-      currentOKIndex -=
-          std::popcount(((uint64_t *)info.cache->bitrange)[--currentWordIndex]);
+    size_t currentCount = 0;
+    for (size_t i = 0; i < info.cache->size / 64; i++) {
+      size_t cnt = std::popcount(((uint64_t *)info.cache->bitrange)[i]);
 
-      int nthBit = sampleOKIndex - currentOKIndex;
-      assert(nthBit > 0);
-      assert(nthBit < 64);
-
-      int j = 0;
-      int i = 0;
-      while (i < 64 && j < nthBit) {
-        if ((1 << i) & ((uint64_t *)info.cache->bitrange)[currentWordIndex]) {
-          j++;
+      if (currentCount + cnt > sampleOKIndex) {
+        size_t cnt = 0;
+        size_t j = 0;
+        for (; j < 64 && cnt < (sampleOKIndex - currentCount); j++) {
+          cnt += (int)((bool)((1 << (64 - 1 - j)) &
+                              (((uint64_t *)info.cache->bitrange)[i])));
         }
 
-        i++;
+        sampleIndex += j - 1;
+        break;
+      } else {
+        currentCount += cnt;
+        sampleIndex += 64;
       }
-
-      assert(j == nthBit);
-      assert(i >= nthBit);
-
-      sampleIndex = currentWordIndex * sizeof(uint64_t) + j;
-      assert(sampleIndex > 0 &&
-             sampleIndex < (info.cache->nRows - cacheGenOptions.sampleDim) *
-                               (info.cache->nCols - cacheGenOptions.sampleDim));
     }
   }
+
+  int scalingFactor = info.maxDimX / info.cache->nCols;
+  assert(scalingFactor);
+  assert(scalingFactor == info.maxDimY / info.cache->nRows);
+
+  // sampleIndex *= scalingFactor * scalingFactor;
+
+  std::cout << "scaling factor: " << scalingFactor << std::endl;
+
+  // sampleIndex += info.maxDimX * (std::rand() % scalingFactor);
+  // sampleIndex += std::rand() % scalingFactor;
+  std::cout << "row: " << sampleIndex % info.cache->nCols << std::endl;
+  size_t sampleIndexX = (sampleIndex % info.cache->nCols) * scalingFactor;
+  size_t sampleIndexY = (sampleIndex / info.cache->nRows) * scalingFactor;
 
   std::cout << "final path: " << info.path << std::endl;
 
@@ -389,10 +497,11 @@ std::vector<float *> Sampler::randomSample() {
         "vrt:///vsizip/" +
         (std::filesystem::canonical(info.path) /
          (info.productName + "-" + flavor + ".tif" +
-          std::format("?outsize={},{}", info.maxDimX, info.maxDimX)))
+          std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
             .string();
 
-    GDALDataset *ds = GDALDataset::Open(dsPath.c_str(), GF_Read);
+    GDALDataset *ds = GDALDataset::FromHandle(
+        GDALOpenShared(dsPath.c_str(), GDALAccess::GA_ReadOnly));
 
     if (!ds) {
       std::cout << "failed to open " << dsPath << std::endl;
@@ -405,17 +514,28 @@ std::vector<float *> Sampler::randomSample() {
     }
 
     for (const auto &band : ds->GetBands()) {
+      std::cout << "read band " << band->GetBand() << " of " << info.productName
+                << " of flavor " << flavor
+                << std::format(
+                       "({}, {}, {}, {})", sampleIndex % ds->GetRasterXSize(),
+                       sampleIndex / ds->GetRasterXSize(),
+                       cacheGenOptions.sampleDim, cacheGenOptions.sampleDim)
+                << std::endl;
       float *data = (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
                                     cacheGenOptions.sampleDim);
       CPLErr e = band->RasterIO(
-          GF_Read, sampleIndex % ds->GetRasterXSize(),
-          sampleIndex / ds->GetRasterXSize(), cacheGenOptions.sampleDim,
+          GF_Read, sampleIndexX, sampleIndexY, cacheGenOptions.sampleDim,
           cacheGenOptions.sampleDim, data, cacheGenOptions.sampleDim,
           cacheGenOptions.sampleDim, GDT_Float32, 0, 0);
 
       if (e) {
         std::cout << "failed to read band " << band->GetBand() << " of "
-                  << info.productName << " of flavor " << flavor << std::endl;
+                  << info.productName << " of flavor " << flavor
+                  << std::format(
+                         "({}, {}, {}, {})", sampleIndex % ds->GetRasterXSize(),
+                         sampleIndex / ds->GetRasterXSize(),
+                         cacheGenOptions.sampleDim, cacheGenOptions.sampleDim)
+                  << std::endl;
         free(data);
 
         for (const auto &band : bands) {
@@ -428,7 +548,7 @@ std::vector<float *> Sampler::randomSample() {
       bands.push_back(data);
     }
 
-    ds->Close();
+    // ds->Close();
   }
 
   return bands;

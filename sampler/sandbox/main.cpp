@@ -12,6 +12,8 @@
 #include <opencv2/opencv.hpp>
 
 int main() {
+  std::srand(time(NULL));
+
   sats::Sampler s("../data/2022/10",
                   {
                       .minOKPercentage = 0.99,
@@ -21,28 +23,44 @@ int main() {
                   },
                   std::nullopt);
 
-  std::vector<float *> bands = s.randomSample();
+  while (true) {
+    std::vector<float *> bands = s.randomSample();
 
-  cv::Mat temp;
-  cv::Mat r, g, b;
+    cv::Mat temp;
+    cv::Mat r, g, b;
 
-  temp = cv::Mat(256, 256, CV_32F, bands[0]);
+    temp = cv::Mat(256, 256, CV_32F, bands[0]);
 
-  cv::divide(40000.0, temp, r);
+    cv::divide(100000.0, temp, r);
 
-  temp = cv::Mat(256, 256, CV_32F, bands[1]);
-  cv::divide(40000.0, temp, g);
+    temp = cv::Mat(256, 256, CV_32F, bands[1]);
+    cv::divide(100000.0, temp, g);
 
-  temp = cv::Mat(256, 256, CV_32F, bands[2]);
-  cv::divide(40000.0, temp, b);
+    temp = cv::Mat(256, 256, CV_32F, bands[2]);
+    cv::divide(100000.0, temp, b);
 
-  cv::Mat together;
-  cv::merge(std::vector{b, g, r}, together);
+    cv::Mat together;
+    cv::merge(std::vector{b, g, r}, together);
+    together.convertTo(together, CV_8UC3);
 
-  cv::Mat togetherOut;
-  together.convertTo(togetherOut, CV_8UC3);
+    // cv::Mat kmeans;
+    // cv::kmeans(together, 10, kmeans,
+    //            cv::TermCriteria(cv::TermCriteria::COUNT, 10, 1.), 10,
+    //            cv::KMEANS_PP_CENTERS);
+    // // auto newSize = cv::Size(together.cols, together.rows);
+    // kmeans = kmeans.reshape(1, together.rows);
+    // kmeans.convertTo(kmeans, CV_32F);
+    // cv::normalize(kmeans, kmeans);
 
-  cv::imwrite("out.png", togetherOut);
-  // cv::imshow("bro?", normalized);
-  // cv::waitKey();
+    // cv::Mat togetherOut;
+    // kmeans.convertTo(togetherOut, CV_8U);
+
+    // cv::imwrite("out.png", togetherOut);
+    cv::imshow("bro?", together);
+    // cv::waitKey();
+    //
+    for (const auto &band : bands) {
+      free(band);
+    }
+  }
 }

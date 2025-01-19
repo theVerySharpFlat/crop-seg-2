@@ -33,7 +33,6 @@ public:
 
   std::vector<float *> randomSample();
 
-private:
   struct SampleCache {
     uint8_t *bitrange;
     size_t size;
@@ -58,10 +57,16 @@ private:
 
   std::vector<SampleInfo> infos;
 
+  size_t computeSampleIndex(size_t okIndex, const SampleCache &cache);
+
   std::pair<std::optional<SampleCache>, std::string>
   genCache(const SampleInfo &info, SampleCacheGenOptions genOptions);
 
   SampleCacheGenOptions cacheGenOptions;
+
+#ifdef TESTING
+  FRIEND_TEST(SamplerTest, IndexTest);
+#endif
 };
 
 } // namespace sats
