@@ -9,7 +9,6 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <optional>
-#include <sampler.h>
 
 #include <opencv2/opencv.hpp>
 
@@ -22,6 +21,11 @@ TEST(SamplerTest, IndexTest) {
   std::srand(time(NULL));
 
   sats::Sampler s("../data/2022/10",
+                  {
+                    .dbPath = "cache-test.db",
+                    .nCacheGenThreads = 1,
+                    .nCacheQueryThreads = 1,
+                  },
                   {
                       .minOKPercentage = 0.99,
                       .sampleDim = 256,

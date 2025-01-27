@@ -1,24 +1,26 @@
 #include "sampler.h"
-#include "cpu/mapgen.h"
 #include "cuda/mapgen.h"
-#include "signal.h"
 #include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <format>
-#include <iterator>
 #include <optional>
 #include <regex>
+#include <sqlite3.h>
+#include <unistd.h>
 
 #include <gdal.h>
 #include <gdal_priv.h>
 
 #include <iostream>
 #include <omp.h>
+#include <sys/stat.h>
 #include <utility>
 
 namespace sats {
@@ -123,12 +125,214 @@ getMaxResolution(const std::filesystem::path &path) {
   return std::make_pair(maxDimX, maxDimY);
 }
 
-Sampler::Sampler(const std::filesystem::path &dataDir,
-                 SampleCacheGenOptions cacheGenOptions,
-                 std::optional<DateRange> dateRange, bool preproc) {
-  GDALAllRegister();
+std::optional<std::string>
+Sampler::writeCacheEntry(sqlite3 *conn, const ComputationCache &cache) {
+  const char *updateQuery =
+      "INSERT OR REPLACE INTO COMPUTATIONS(PRODUCT, SAMPLEMAP, SAMPLEDIMX, "
+      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD)"
+      "  VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
 
-  this->cacheGenOptions = cacheGenOptions;
+  sqlite3_stmt *stmt;
+  if (sqlite3_prepare_v2(conn, updateQuery, -1, &stmt, NULL) != SQLITE_OK) {
+    return "failed to prepare statment: " + std::string(sqlite3_errmsg(conn));
+  }
+
+  // std::cout << "lastmod: " << cache.unixModTime << std::endl;
+
+  sqlite3_bind_text(stmt, 1, cache.productName.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_blob(stmt, 2, cache.sampleCache.bitrange,
+                    (int)cache.sampleCache.size, SQLITE_STATIC);
+  sqlite3_bind_int64(stmt, 3, *((int64_t *)&cache.sampleCache.nCols));
+  sqlite3_bind_int64(stmt, 4, *((int64_t *)&cache.sampleCache.nRows));
+  sqlite3_bind_int64(stmt, 5, *((int64_t *)&cache.sampleCache.nOK));
+  sqlite3_bind_int64(stmt, 6, *((int64_t *)&cache.maxDimX));
+  sqlite3_bind_int64(stmt, 7, *((int64_t *)&cache.maxDimY));
+  sqlite3_bind_int64(stmt, 8, *((int64_t *)&cache.unixModTime));
+
+  int ret;
+  while (ret = sqlite3_step(stmt), ret == SQLITE_ROW || ret == SQLITE_OK) {
+  }
+
+  if (ret != SQLITE_DONE) {
+    auto errmsg = "sqlite step error: " + std::string(sqlite3_errmsg(conn));
+    sqlite3_finalize(stmt);
+    return errmsg;
+  }
+
+  sqlite3_finalize(stmt);
+
+  return std::nullopt;
+}
+
+std::optional<std::string> Sampler::setupSQLCache() {
+
+  size_t nConns = std::max(sampleOptions.nCacheGenThreads,
+                           sampleOptions.nCacheQueryThreads);
+  connectionPool.resize(nConns);
+  for (size_t i = 0; i < nConns; i++) {
+    int ret = sqlite3_open_v2(
+        sampleOptions.dbPath.c_str(), &connectionPool[i],
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL);
+
+    if (ret != SQLITE_OK) {
+      return std::format("sqlite_open_v2: {}",
+                         sqlite3_errmsg(connectionPool[i]));
+    }
+  }
+
+  const char *tableSetup =
+      "CREATE TABLE IF NOT EXISTS COMPUTATIONS("
+      "PRODUCT       TEXT                PRIMARY KEY     NOT NULL,"
+      "SAMPLEMAP     BLOB                                NOT NULL,"
+      "SAMPLEDIMX    UNSIGNED BIG INT                    NOT NULL,"
+      "SAMPLEDIMY    UNSIGNED BIG INT                    NOT NULL,"
+      "NOK           UNSIGNED BIG INT                    NOT NULL,"
+      ""
+      "MAXDIMX       UNSIGNED BIG INT                    NOT NULL,"
+      "MAXDIMY       UNSIGNED BIG INT                    NOT NULL,"
+      ""
+      "LASTMOD       UNSIGNED BIG INT                    NOT NULL"
+      ");";
+
+  // assert(sampleOptions.nThreads > 0);
+
+  sqlite3_stmt *stmt;
+  int ret = sqlite3_prepare_v2(connectionPool[0], tableSetup, -1, &stmt, NULL);
+  if (ret != SQLITE_OK) {
+    return std::format("sqlite3_prepare_v2: {}",
+                       sqlite3_errmsg(connectionPool[0]));
+  }
+
+  while (ret = sqlite3_step(stmt), ret == SQLITE_ROW && ret == SQLITE_OK)
+    ;
+
+  if (ret != SQLITE_DONE) {
+    auto errmsg =
+        std::format("sqlite3_step_v2: {}", sqlite3_errmsg(connectionPool[0]));
+
+    sqlite3_finalize(stmt);
+
+    return errmsg;
+  }
+
+  sqlite3_finalize(stmt);
+
+  return std::nullopt;
+}
+
+std::optional<std::string> Sampler::getCacheEntry(sqlite3 *conn,
+                                                  const SampleInfo &info,
+                                                  ComputationCache *cache,
+                                                  bool *oCachePresent) {
+  const char *query = "SELECT SAMPLEMAP, SAMPLEDIMX, "
+                      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD "
+                      "FROM COMPUTATIONS WHERE PRODUCT = ?;";
+
+  sqlite3_stmt *stmt;
+  int ret = sqlite3_prepare_v2(conn, query, -1, &stmt, NULL);
+  if (ret != SQLITE_OK) {
+    return std::format("sqlite3_prepare_v2: {}", sqlite3_errmsg(conn));
+  }
+
+  sqlite3_bind_text(stmt, 1, info.productName.c_str(), -1, SQLITE_STATIC);
+
+  ret = sqlite3_step(stmt);
+
+  if (ret != SQLITE_ROW) {
+    *oCachePresent = false;
+    if (ret == SQLITE_DONE) {
+      sqlite3_finalize(stmt);
+      return std::nullopt;
+    }
+
+    auto errmsg = sqlite3_errmsg(conn);
+    sqlite3_finalize(stmt);
+    return std::string(errmsg);
+  }
+
+  size_t samplemapSize = sqlite3_column_bytes(stmt, 0);
+  const void *sqliteSampleMap = sqlite3_column_blob(stmt, 0);
+
+  uint8_t *sampleMap = (uint8_t *)malloc(samplemapSize);
+  memcpy(sampleMap, sqliteSampleMap, samplemapSize);
+
+  uint64_t sampleDimX;
+  int64_t sqliteSampleDimX = sqlite3_column_int64(stmt, 1);
+  sampleDimX = *((uint64_t *)&sqliteSampleDimX); // evil
+
+  uint64_t sampleDimY;
+  int64_t sqliteSampleDimY = sqlite3_column_int64(stmt, 2);
+  sampleDimY = *((uint64_t *)&sqliteSampleDimY); // evil
+
+  uint64_t nOK;
+  int64_t sqliteNOK = sqlite3_column_int64(stmt, 3);
+  nOK = *((uint64_t *)&sqliteNOK); // evil
+
+  uint64_t maxDimX;
+  int64_t sqliteMaxDimX = sqlite3_column_int64(stmt, 4);
+  maxDimX = *((uint64_t *)&sqliteMaxDimX); // evil
+
+  uint64_t maxDimY;
+  int64_t sqliteMaxDimY = sqlite3_column_int64(stmt, 5);
+  maxDimY = *((uint64_t *)&sqliteMaxDimY); // evil
+
+  uint64_t lastMod;
+  int64_t sqliteLastmod = sqlite3_column_int64(stmt, 6);
+  lastMod = *((uint64_t *)&sqliteLastmod); // evil
+
+  sqlite3_finalize(stmt);
+
+  // std::cout << "maxDimY from read: " << maxDimY << std::endl;
+  // std::cout << "lastmod from read: " << lastMod << std::endl;
+
+  cache->maxDimX = maxDimX;
+  cache->maxDimY = maxDimY;
+  cache->unixModTime = lastMod;
+
+  cache->sampleCache.nOK = nOK;
+  cache->sampleCache.bitrange = sampleMap;
+  cache->sampleCache.size = samplemapSize;
+  cache->sampleCache.nCols = sampleDimX;
+  cache->sampleCache.nRows = sampleDimY;
+
+  cache->productName = info.productName;
+
+  *oCachePresent = true;
+
+  return std::nullopt;
+}
+
+bool Sampler::cacheValid(const SampleInfo &info,
+                         const ComputationCache &cache) {
+  assert(std::filesystem::exists(info.path));
+
+  if (cache.productName != info.productName) {
+    // std::cout << std::format("cache differs in name {},  {}",
+    // cache.productName,
+    //                          info.productName)
+    //           << std::endl;
+    return false;
+  }
+
+  struct stat s;
+  stat(info.path.c_str(), &s);
+
+  if ((uint64_t)s.st_mtim.tv_sec != cache.unixModTime) {
+    // std::cout << std::format("cache differs in time {}, {}",
+    //                          (uint64_t)s.st_mtim.tv_sec, cache.unixModTime)
+    //           << std::endl;
+    return false;
+  }
+
+  return true;
+}
+
+Sampler::Sampler(const std::filesystem::path &dataDir,
+                 SampleOptions sampleOptions,
+                 SampleCacheGenOptions cacheGenOptions,
+                 std::optional<DateRange> dateRange, bool preproc)
+    : cacheGenOptions(cacheGenOptions), sampleOptions(sampleOptions) {
+  GDALAllRegister();
 
   std::regex re("^REPACK_S2[A-Z]_[A-Z0-9]+_(\\d{4})(\\d{2})(\\d{2})T[1-9]+_[A-"
                 "Z0-9]+_[A-Z0-9]+_([A-Z0-9]+)_[A-Z0-9]+\\.SAFE\\.zip$");
@@ -195,25 +399,19 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
               << path << std::endl;
   }
 
-  omp_set_dynamic(0);
-  omp_set_num_threads(8);
-#pragma omp parallel for
-  for (int i = 0; i < infos.size(); i++) {
-    auto &info = infos[i];
-    if (preproc) {
-      auto [val, err] = genCache(info, cacheGenOptions);
+  auto sqlInitError = setupSQLCache();
+  if (sqlInitError) {
+    std::cout << "sql init error: " << sqlInitError.value() << std::endl;
+  } else {
+    std::cout << "no sql init errors?" << std::endl;
+  }
 
-      std::cout << info.path << std::endl;
-      if (!val.has_value()) {
-        std::cout << "load error: " << err << std::endl;
-      } else {
-        std::cout << "nOK: " << val->nOK << std::endl;
-        std::cout << "xDim, yDim: " << val->nCols << " " << val->nRows
-                  << std::endl;
-      }
+  auto cacheError = ensureCache();
 
-      info.cache = std::move(val);
-    }
+  if (cacheError) {
+    std::cout << "cache error: " << cacheError.value() << std::endl;
+  } else {
+    std::cout << "no cache errors?" << std::endl;
   }
 }
 
@@ -221,32 +419,18 @@ size_t Sampler::computeSampleIndex(size_t sampleOKIndex,
                                    const SampleCache &cache) {
   size_t sampleIndex = 0;
   size_t currentCount = 0;
-  // std::cout << "sampleOKIndex: " << sampleOKIndex << std::endl;
+
   for (size_t i = 0; i < cache.size / 8; i++) {
     size_t cnt = std::popcount(((uint64_t *)cache.bitrange)[i]);
 
     if (currentCount + cnt > (sampleOKIndex + 1)) {
-      // std::cout << "sample base: " << sampleIndex << std::endl;
-      // std::cout << "pre count: " << currentCount << std::endl;
-      // std::cout << "in question: "
-      //           << std::format("{:064b}", ((uint64_t *)cache.bitrange)[i])
-      //           << std::endl;
       cnt = 0;
       size_t j = 0;
       for (; j < 64 && cnt < ((sampleOKIndex + 1) - currentCount); j++) {
         cnt += (size_t)((bool)((1ul << (/* 63 -  */ j)) &
                                ((((uint64_t *)cache.bitrange)[i]))));
-
-        // std::cout << "mask: "
-        //           << std::format(
-        //                  "{:064b}",
-        //                  ((1ul << j) & ((((uint64_t *)cache.bitrange)[i]))))
-        //           << std::endl;
       }
 
-      // std::cout << "cnt: " << cnt << " " << sampleOKIndex + 1 - currentCount
-      //           << std::endl;
-      // std::cout << "j: " << j << std::endl;
       assert(cnt == (sampleOKIndex + 1 - currentCount));
 
       sampleIndex += j;
@@ -266,15 +450,12 @@ size_t Sampler::computeSampleIndex(size_t sampleOKIndex,
     }
   }
 
-  // std::cout << "currentCount: " << currentCount << std::endl;
-  // std::cout << "sampleIndex - 1: " << sampleIndex - 1 << std::endl;
-
   return sampleIndex - 1;
 }
 
 std::pair<std::optional<Sampler::SampleCache>, std::string>
-Sampler::genCache(const SampleInfo &info,
-                  Sampler::SampleCacheGenOptions genOptions) {
+Sampler::genSampleCache(const SampleInfo &info,
+                        Sampler::SampleCacheGenOptions genOptions) {
   const std::filesystem::path &path = info.path;
 
   const auto productName = getProductName(path);
@@ -406,6 +587,126 @@ Sampler::genCache(const SampleInfo &info,
   return ret;
 };
 
+std::optional<std::string> Sampler::ensureCache() {
+  std::vector<SampleInfo *> cacheGenQueue(infos.size(), nullptr);
+  size_t cacheGenQueueIndex = 0;
+
+  omp_lock_t queueGenErrorLock;
+  std::string queueGenError = "";
+  omp_init_lock(&queueGenErrorLock);
+
+  omp_set_num_threads(sampleOptions.nCacheQueryThreads);
+#pragma omp parallel for
+  for (size_t i = 0; i < infos.size(); i++) {
+    size_t threadNum = omp_get_thread_num();
+    sqlite3 *conn = connectionPool[threadNum];
+
+    ComputationCache cache = {};
+    bool hasCache = false;
+    auto err = getCacheEntry(conn, infos[i], &cache, &hasCache);
+
+    if (err) {
+      omp_set_lock(&queueGenErrorLock);
+      if (queueGenError.size() != 0) {
+        queueGenError += ", ";
+      }
+      queueGenError += infos[i].productName + ": " + err.value() + "\n";
+      omp_unset_lock(&queueGenErrorLock);
+    }
+
+    if (!hasCache || !cacheValid(infos[i], cache)) {
+      size_t queueIndex;
+#pragma omp atomic capture
+      queueIndex = cacheGenQueueIndex++;
+      cacheGenQueue[queueIndex] = &infos[i];
+    }
+  }
+  omp_destroy_lock(&queueGenErrorLock);
+
+  if (!queueGenError.empty()) {
+    return "queuegen errors: " + queueGenError;
+  }
+
+  omp_lock_t cacheGenErrorLock;
+  std::string cacheGenError = "";
+  omp_init_lock(&cacheGenErrorLock);
+
+  std::cout << "num teams: " << omp_get_num_teams() << std::endl;
+  omp_set_num_threads(sampleOptions.nCacheGenThreads);
+#pragma omp parallel for
+  for (size_t i = 0; i < cacheGenQueueIndex; i++) {
+    auto [sampleCache, err] =
+        genSampleCache(*cacheGenQueue[i], cacheGenOptions);
+
+    if (!sampleCache.has_value()) {
+      omp_set_lock(&cacheGenErrorLock);
+      if (cacheGenError.size() != 0) {
+        cacheGenError += ", ";
+      }
+
+      cacheGenError += cacheGenQueue[i]->productName + ": " + err;
+
+      omp_unset_lock(&cacheGenErrorLock);
+    }
+
+    auto maxDims = getMaxResolution(cacheGenQueue[i]->path.string());
+    if (!maxDims.has_value()) {
+      omp_set_lock(&cacheGenErrorLock);
+      if (cacheGenError.size() != 0) {
+        cacheGenError += ", ";
+      }
+
+      cacheGenError += cacheGenQueue[i]->productName +
+                       ": failed to retreive maximum dimensions---either this "
+                       "is a filesystem issue or the dimension scaling is "
+                       "invalid in this product\n";
+
+      omp_unset_lock(&cacheGenErrorLock);
+    }
+
+    struct stat st;
+    int ret = stat(cacheGenQueue[i]->path.c_str(), &st);
+    uint64_t lastModTime = st.st_mtim.tv_sec;
+
+    ComputationCache cache = {.sampleCache = sampleCache.value(),
+                              .maxDimX = maxDims->first,
+                              .maxDimY = maxDims->second,
+                              .productName =
+                                  cacheGenQueue[i]->productName.c_str(),
+                              .unixModTime = lastModTime};
+
+    // write cache entry
+    std::optional<std::string> writeErr = std::nullopt;
+#pragma omp critical(WRITE_CACHE)
+    writeErr = writeCacheEntry(connectionPool[omp_get_thread_num()], cache);
+
+    if (writeErr) {
+      omp_set_lock(&cacheGenErrorLock);
+      cacheGenError += cacheGenQueue[i]->productName +
+                       " cache write error: " + writeErr.value() + "\n";
+      omp_unset_lock(&cacheGenErrorLock);
+    }
+  }
+  omp_destroy_lock(&cacheGenErrorLock);
+
+  if (cacheGenError.size() != 0) {
+    return cacheGenError;
+  }
+
+  return std::nullopt;
+} // namespace sats
+
+std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
+  // 1. get files to sample (synchronous)
+  // std::set<std::string> products;
+  // std::set<std::pair<std::string, std::pair<
+
+  // 2. randomly sample said files (threaded)
+  // 3. return (join)
+
+  return std::vector<std::vector<float *>>();
+}
+
 std::vector<float *> Sampler::randomSample() {
 
   int fileIndex = std::rand() % infos.size();
@@ -413,78 +714,14 @@ std::vector<float *> Sampler::randomSample() {
 
   size_t sampleOKIndex = std::rand() % info.cache->nOK;
 
-  int sampleIndex = 0;
-  {
-    // size_t currentOKIndex = 0;
-    // size_t currentWordIndex = 0;
-    // while (currentOKIndex < sampleOKIndex) {
-    //   currentOKIndex +=
-    //       std::popcount(((uint64_t
-    //       *)info.cache->bitrange)[currentWordIndex++]);
-    // }
-    //
-    // if (currentOKIndex != sampleOKIndex) {
-    //   currentOKIndex -=
-    //       std::popcount(((uint64_t
-    //       *)info.cache->bitrange)[--currentWordIndex]);
-    //
-    //   size_t nthBit = sampleOKIndex - currentOKIndex;
-    //   assert(nthBit > 0);
-    //   assert(nthBit < 64);
-    //
-    //   size_t j = 0;
-    //   size_t i = 0;
-    //   while (i < 64 && j < nthBit) {
-    //     if (((uint64_t)1 << (64 - i - 1)) &
-    //         ((uint64_t *)info.cache->bitrange)[currentWordIndex]) {
-    //       j++;
-    //     }
-    //
-    //     i++;
-    //   }
-    //
-    //   assert(j == nthBit);
-    //   assert(i >= nthBit);
-    //
-    //   sampleIndex = currentWordIndex * sizeof(uint64_t) + i;
-    //   assert((10980 / 2) - (sampleIndex % (10980 / 2)) >= 128);
-    //   assert(sampleIndex > 0 &&
-    //          sampleIndex < (info.cache->nRows - cacheGenOptions.sampleDim) *
-    //                            (info.cache->nCols -
-    //                            cacheGenOptions.sampleDim));
-    // }
-
-    size_t currentCount = 0;
-    for (size_t i = 0; i < info.cache->size / 64; i++) {
-      size_t cnt = std::popcount(((uint64_t *)info.cache->bitrange)[i]);
-
-      if (currentCount + cnt > sampleOKIndex) {
-        size_t cnt = 0;
-        size_t j = 0;
-        for (; j < 64 && cnt < (sampleOKIndex - currentCount); j++) {
-          cnt += (int)((bool)((1 << (64 - 1 - j)) &
-                              (((uint64_t *)info.cache->bitrange)[i])));
-        }
-
-        sampleIndex += j - 1;
-        break;
-      } else {
-        currentCount += cnt;
-        sampleIndex += 64;
-      }
-    }
-  }
+  int sampleIndex = computeSampleIndex(sampleOKIndex, info.cache.value());
 
   int scalingFactor = info.maxDimX / info.cache->nCols;
   assert(scalingFactor);
   assert(scalingFactor == info.maxDimY / info.cache->nRows);
 
-  // sampleIndex *= scalingFactor * scalingFactor;
-
   std::cout << "scaling factor: " << scalingFactor << std::endl;
 
-  // sampleIndex += info.maxDimX * (std::rand() % scalingFactor);
-  // sampleIndex += std::rand() % scalingFactor;
   std::cout << "row: " << sampleIndex % info.cache->nCols << std::endl;
   size_t sampleIndexX = (sampleIndex % info.cache->nCols) * scalingFactor;
   size_t sampleIndexY = (sampleIndex / info.cache->nRows) * scalingFactor;
