@@ -1,4 +1,5 @@
 #include "sampler.h"
+#include "cpu/mapgen.h"
 #include "cuda/mapgen.h"
 #include <algorithm>
 #include <bit>
@@ -21,11 +22,13 @@
 #include <iostream>
 #include <omp.h>
 #include <sys/stat.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace sats {
 
-static const std::string flavors[] = {"HIRES", "LOWRES"};
+static const std::string flavors[] = {"HIRES", "LOWRES", "MSK"};
 
 static std::optional<std::string>
 getProductName(const std::filesystem::path &path) {
@@ -392,7 +395,7 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
         .tileName = tileName,
         .maxDimX = maxRes->first,
         .maxDimY = maxRes->second,
-        .cache = std::nullopt,
+        // .cache = std::nullopt,
     });
 
     std::cout << year << " " << month << " " << day << " " << tileName << ": "
@@ -520,7 +523,7 @@ Sampler::genSampleCache(const SampleInfo &info,
 
   size_t scalingFactor = info.maxDimX / ds->GetRasterXSize();
 
-#if HAS_CUDA
+#if 0 && HAS_CUDA
   cudaproc::generateSampleMap(
       (unsigned char *)bands, nBands - 2,
       (unsigned char *)((char *)bands + cldIdx * nPixels),
@@ -573,16 +576,13 @@ Sampler::genSampleCache(const SampleInfo &info,
   free(bands);
   ds->Close();
 
-  SampleCache cache = {
-      .bitrange = condensed,
-      .size = nPixelsCondensed,
-      .nOK = okTotal,
-      .nRows = (size_t)ds->GetRasterYSize(),
-      .nCols = (size_t)ds->GetRasterXSize(),
-  };
-
   auto ret = std::make_pair(SampleCache{}, "");
-  ret.first = cache;
+  // ret.first = std::move(cache);
+  ret.first.bitrange = condensed;
+  ret.first.size = nPixelsCondensed;
+  ret.first.nOK = okTotal;
+  ret.first.nRows = (size_t)ds->GetRasterYSize();
+  ret.first.nCols = (size_t)ds->GetRasterXSize();
 
   return ret;
 };
@@ -612,6 +612,8 @@ std::optional<std::string> Sampler::ensureCache() {
       }
       queueGenError += infos[i].productName + ": " + err.value() + "\n";
       omp_unset_lock(&queueGenErrorLock);
+
+      continue;
     }
 
     if (!hasCache || !cacheValid(infos[i], cache)) {
@@ -619,7 +621,15 @@ std::optional<std::string> Sampler::ensureCache() {
 #pragma omp atomic capture
       queueIndex = cacheGenQueueIndex++;
       cacheGenQueue[queueIndex] = &infos[i];
+
+      if (hasCache) {
+        freeSampleCache(cache.sampleCache);
+      }
+
+      continue;
     }
+
+    freeSampleCache(cache.sampleCache);
   }
   omp_destroy_lock(&queueGenErrorLock);
 
@@ -647,6 +657,8 @@ std::optional<std::string> Sampler::ensureCache() {
       cacheGenError += cacheGenQueue[i]->productName + ": " + err;
 
       omp_unset_lock(&cacheGenErrorLock);
+
+      continue;
     }
 
     auto maxDims = getMaxResolution(cacheGenQueue[i]->path.string());
@@ -662,13 +674,16 @@ std::optional<std::string> Sampler::ensureCache() {
                        "invalid in this product\n";
 
       omp_unset_lock(&cacheGenErrorLock);
+
+      freeSampleCache(sampleCache.value());
+      continue;
     }
 
     struct stat st;
     int ret = stat(cacheGenQueue[i]->path.c_str(), &st);
     uint64_t lastModTime = st.st_mtim.tv_sec;
 
-    ComputationCache cache = {.sampleCache = sampleCache.value(),
+    ComputationCache cache = {.sampleCache = std::move(sampleCache.value()),
                               .maxDimX = maxDims->first,
                               .maxDimY = maxDims->second,
                               .productName =
@@ -686,6 +701,8 @@ std::optional<std::string> Sampler::ensureCache() {
                        " cache write error: " + writeErr.value() + "\n";
       omp_unset_lock(&cacheGenErrorLock);
     }
+
+    freeSampleCache(sampleCache.value());
   }
   omp_destroy_lock(&cacheGenErrorLock);
 
@@ -700,96 +717,273 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
   // 1. get files to sample (synchronous)
   // std::set<std::string> products;
   // std::set<std::pair<std::string, std::pair<
+  struct SampleIndex {
+    SampleInfo *info;
+    size_t sampleCoordIndex;
+    ComputationCache *cache;
 
-  // 2. randomly sample said files (threaded)
-  // 3. return (join)
-
-  return std::vector<std::vector<float *>>();
-}
-
-std::vector<float *> Sampler::randomSample() {
-
-  int fileIndex = std::rand() % infos.size();
-  const auto &info = infos[fileIndex];
-
-  size_t sampleOKIndex = std::rand() % info.cache->nOK;
-
-  int sampleIndex = computeSampleIndex(sampleOKIndex, info.cache.value());
-
-  int scalingFactor = info.maxDimX / info.cache->nCols;
-  assert(scalingFactor);
-  assert(scalingFactor == info.maxDimY / info.cache->nRows);
-
-  std::cout << "scaling factor: " << scalingFactor << std::endl;
-
-  std::cout << "row: " << sampleIndex % info.cache->nCols << std::endl;
-  size_t sampleIndexX = (sampleIndex % info.cache->nCols) * scalingFactor;
-  size_t sampleIndexY = (sampleIndex / info.cache->nRows) * scalingFactor;
-
-  std::cout << "final path: " << info.path << std::endl;
-
-  std::vector<float *> bands;
-  for (const auto &flavor : flavors) {
-    std::string dsPath =
-        "vrt:///vsizip/" +
-        (std::filesystem::canonical(info.path) /
-         (info.productName + "-" + flavor + ".tif" +
-          std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
-            .string();
-
-    GDALDataset *ds = GDALDataset::FromHandle(
-        GDALOpenShared(dsPath.c_str(), GDALAccess::GA_ReadOnly));
-
-    if (!ds) {
-      std::cout << "failed to open " << dsPath << std::endl;
-
-      for (const auto &band : bands) {
-        free(band);
+    inline bool operator<(const SampleIndex &other) const {
+      if (info < other.info) {
+        return true;
+      } else if (info > other.info) {
+        return false;
       }
 
-      return std::vector<float *>();
+      return sampleCoordIndex < other.sampleCoordIndex;
     }
+  };
 
-    for (const auto &band : ds->GetBands()) {
-      std::cout << "read band " << band->GetBand() << " of " << info.productName
-                << " of flavor " << flavor
-                << std::format(
-                       "({}, {}, {}, {})", sampleIndex % ds->GetRasterXSize(),
-                       sampleIndex / ds->GetRasterXSize(),
-                       cacheGenOptions.sampleDim, cacheGenOptions.sampleDim)
-                << std::endl;
-      float *data = (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
-                                    cacheGenOptions.sampleDim);
-      CPLErr e = band->RasterIO(
-          GF_Read, sampleIndexX, sampleIndexY, cacheGenOptions.sampleDim,
-          cacheGenOptions.sampleDim, data, cacheGenOptions.sampleDim,
-          cacheGenOptions.sampleDim, GDT_Float32, 0, 0);
+  std::set<SampleIndex> samples;
+  std::unordered_map<SampleInfo *, ComputationCache> caches;
 
-      if (e) {
-        std::cout << "failed to read band " << band->GetBand() << " of "
-                  << info.productName << " of flavor " << flavor
-                  << std::format(
-                         "({}, {}, {}, {})", sampleIndex % ds->GetRasterXSize(),
-                         sampleIndex / ds->GetRasterXSize(),
-                         cacheGenOptions.sampleDim, cacheGenOptions.sampleDim)
+  // cursed loop index modification lol
+  for (size_t _i = 1; _i < n + 1; _i++) {
+    size_t infoIndex = (size_t)(std::rand() % infos.size());
+    SampleInfo *info = &infos[infoIndex];
+
+    if (!caches.contains(info)) {
+      caches[info] = {};
+
+      ComputationCache *cache = &caches[info];
+      bool haveCache;
+
+      auto err = getCacheEntry(connectionPool[0], *info, cache, &haveCache);
+
+      if (err) {
+        std::cout << "randomSampleV2: cache read error: " << err.value()
                   << std::endl;
-        free(data);
-
-        for (const auto &band : bands) {
-          free(band);
-        }
-
-        return std::vector<float *>();
+        return std::vector<std::vector<float *>>{};
       }
 
-      bands.push_back(data);
+      if (!haveCache) {
+        std::cout << "randomSampleV2: cache not present for "
+                  << info->productName << std::endl;
+        return std::vector<std::vector<float *>>{};
+      }
+    }
+    ComputationCache *cache = &caches[info];
+
+    size_t sampleNOKIndex = 0;
+    if (cache->sampleCache.nOK) {
+      sampleNOKIndex = (size_t)(std::rand() % cache->sampleCache.nOK);
     }
 
-    // ds->Close();
+    auto sampleIndex = computeSampleIndex(sampleNOKIndex, cache->sampleCache);
+
+    SampleIndex index = {
+        .info = info,
+        .sampleCoordIndex = sampleIndex,
+        .cache = cache,
+    };
+
+    if (samples.contains(index) || !cache->sampleCache.nOK) {
+      _i--;
+    } else {
+      samples.insert(index);
+    }
   }
 
-  return bands;
+  // 2. sample (threaded)
+  std::vector<std::vector<float *>> reads;
+
+#pragma omp parallel
+  {
+#pragma omp single
+    for (const auto &sample : samples) {
+#pragma omp task
+      {
+        SampleIndex sampleInfo = sample;
+        const auto &info = *sampleInfo.info;
+        SampleCache *cache = &sampleInfo.cache->sampleCache;
+
+        int scalingFactor = info.maxDimX / cache->nCols;
+        assert(scalingFactor);
+        assert(scalingFactor == info.maxDimY / cache->nRows);
+
+        size_t sampleIndexX =
+            sample.sampleCoordIndex % sample.cache->sampleCache.nCols;
+        size_t sampleIndexY =
+            sample.sampleCoordIndex / sample.cache->sampleCache.nCols;
+
+        sampleIndexX *= scalingFactor;
+        sampleIndexY *= scalingFactor;
+
+        std::cout << "final path: " << info.path << std::endl;
+
+        std::vector<float *> bands;
+        for (const auto &flavor : flavors) {
+          std::string dsPath =
+              "vrt:///vsizip/" +
+              (std::filesystem::canonical(info.path) /
+               (info.productName + "-" + flavor + ".tif" +
+                std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
+                  .string();
+
+          GDALDatasetUniquePtr ds =
+              GDALDatasetUniquePtr(GDALDataset::FromHandle(
+                  GDALOpenShared(dsPath.c_str(), GDALAccess::GA_ReadOnly)));
+
+          if (!ds) {
+            std::cout << "failed to open " << dsPath << std::endl;
+
+            for (const auto &band : bands) {
+              free(band);
+            }
+
+            continue;
+
+            // return
+          }
+
+          bool readError = false;
+          for (const auto &band : ds->GetBands()) {
+            std::cout << "read band " << band->GetBand() << " of "
+                      << info.productName << " of flavor " << flavor
+                      << std::format("({}, {}, {}, {})", sampleIndexX,
+                                     sampleIndexY, cacheGenOptions.sampleDim,
+                                     cacheGenOptions.sampleDim)
+                      << std::endl;
+            float *data =
+                (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
+                                cacheGenOptions.sampleDim);
+            CPLErr e = band->RasterIO(
+                GF_Read, sampleIndexX, sampleIndexY, cacheGenOptions.sampleDim,
+                cacheGenOptions.sampleDim, data, cacheGenOptions.sampleDim,
+                cacheGenOptions.sampleDim, GDT_Float32, 0, 0);
+
+            if (e) {
+              std::cout << "failed to read band " << band->GetBand() << " of "
+                        << info.productName << " of flavor " << flavor
+                        << std::format("({}, {}, {}, {})", sampleIndexX,
+                                       sampleIndexY, cacheGenOptions.sampleDim,
+                                       cacheGenOptions.sampleDim)
+                        << std::endl;
+              free(data);
+
+              readError = true;
+              break;
+            }
+
+            if (!readError) {
+              bands.push_back(data);
+            } else {
+              for (const auto &band : bands) {
+                free(band);
+              }
+
+              bands.clear();
+            }
+          }
+          // ds->Close();
+        }
+
+        freeSampleCache(*cache);
+
+        if (!bands.empty()) {
+#pragma omp critical(UPDATE_BANDS)
+          reads.push_back(bands);
+        }
+      }
+    }
+  }
+  // 3. return (join)
+  return reads;
 }
+
+Sampler::~Sampler() {
+  for (const auto &connection : connectionPool) {
+    sqlite3_close_v2(connection);
+  }
+}
+
+// std::vector<float *> Sampler::randomSample() {
+//
+//   int fileIndex = std::rand() % infos.size();
+//   const auto &info = infos[fileIndex];
+//
+//   size_t sampleOKIndex = std::rand() % info.cache->nOK;
+//
+//   int sampleIndex = computeSampleIndex(sampleOKIndex, info.cache.value());
+//
+//   int scalingFactor = info.maxDimX / info.cache->nCols;
+//   assert(scalingFactor);
+//   assert(scalingFactor == info.maxDimY / info.cache->nRows);
+//
+//   std::cout << "scaling factor: " << scalingFactor << std::endl;
+//
+//   std::cout << "row: " << sampleIndex % info.cache->nCols << std::endl;
+//   size_t sampleIndexX = (sampleIndex % info.cache->nCols) * scalingFactor;
+//   size_t sampleIndexY = (sampleIndex / info.cache->nRows) * scalingFactor;
+//
+//   std::cout << "final path: " << info.path << std::endl;
+//
+//   std::vector<float *> bands;
+//   for (const auto &flavor : flavors) {
+//     std::string dsPath =
+//         "vrt:///vsizip/" +
+//         (std::filesystem::canonical(info.path) /
+//          (info.productName + "-" + flavor + ".tif" +
+//           std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
+//             .string();
+//
+//     GDALDataset *ds = GDALDataset::FromHandle(
+//         GDALOpenShared(dsPath.c_str(), GDALAccess::GA_ReadOnly));
+//
+//     if (!ds) {
+//       std::cout << "failed to open " << dsPath << std::endl;
+//
+//       for (const auto &band : bands) {
+//         free(band);
+//       }
+//
+//       return std::vector<float *>();
+//     }
+//
+//     for (const auto &band : ds->GetBands()) {
+//       std::cout << "read band " << band->GetBand() << " of " <<
+//       info.productName
+//                 << " of flavor " << flavor
+//                 << std::format(
+//                        "({}, {}, {}, {})", sampleIndex %
+//                        ds->GetRasterXSize(), sampleIndex /
+//                        ds->GetRasterXSize(), cacheGenOptions.sampleDim,
+//                        cacheGenOptions.sampleDim)
+//                 << std::endl;
+//       float *data = (float *)malloc(sizeof(float) *
+//       cacheGenOptions.sampleDim
+//       *
+//                                     cacheGenOptions.sampleDim);
+//       CPLErr e = band->RasterIO(
+//           GF_Read, sampleIndexX, sampleIndexY, cacheGenOptions.sampleDim,
+//           cacheGenOptions.sampleDim, data, cacheGenOptions.sampleDim,
+//           cacheGenOptions.sampleDim, GDT_Float32, 0, 0);
+//
+//       if (e) {
+//         std::cout << "failed to read band " << band->GetBand() << " of "
+//                   << info.productName << " of flavor " << flavor
+//                   << std::format(
+//                          "({}, {}, {}, {})", sampleIndex %
+//                          ds->GetRasterXSize(), sampleIndex /
+//                          ds->GetRasterXSize(), cacheGenOptions.sampleDim,
+//                          cacheGenOptions.sampleDim)
+//                   << std::endl;
+//         free(data);
+//
+//         for (const auto &band : bands) {
+//           free(band);
+//         }
+//
+//         return std::vector<float *>();
+//       }
+//
+//       bands.push_back(data);
+//     }
+//
+//     // ds->Close();
+//   }
+//
+//   return bands;
+// }
 
 // return std::make_pair(, "");
 } // namespace sats

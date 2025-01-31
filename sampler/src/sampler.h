@@ -38,6 +38,8 @@ public:
 
   Sampler() = delete;
 
+  virtual ~Sampler();
+
   Sampler(const std::filesystem::path &path, SampleOptions sampleOptions,
           SampleCacheGenOptions options, std::optional<DateRange> dateRange,
           bool preproc = true);
@@ -51,7 +53,7 @@ private:
   // FRIEND_TEST(SamplerTest, IndexTest);
 
   struct SampleCache {
-    uint8_t *bitrange;
+    uint8_t *bitrange = nullptr;
     size_t size;
 
     size_t nOK;
@@ -59,6 +61,13 @@ private:
     size_t nRows;
     size_t nCols;
   };
+
+  inline void freeSampleCache(SampleCache &cache) {
+    if (cache.bitrange) {
+      free(cache.bitrange);
+      cache.bitrange = nullptr;
+    }
+  }
 
   struct ComputationCache {
     SampleCache sampleCache;
@@ -79,7 +88,7 @@ private:
 
     size_t maxDimX, maxDimY;
 
-    std::optional<SampleCache> cache;
+    // std::optional<SampleCache> cache;
   };
 
   std::vector<SampleInfo> infos;

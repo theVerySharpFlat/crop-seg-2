@@ -25,25 +25,38 @@ int main() {
       },
       std::nullopt);
 
-  // while (true) {
-  //   std::vector<float *> bands = s.randomSample();
-  //
+  for (size_t i = 0; i < 100; i++) {
+    size_t nSamples = 100;
+    auto samples = s.randomSampleV2(nSamples);
+    assert(samples.size() == nSamples);
+
+    for (const auto &sample : samples) {
+      for (const auto &band : sample) {
+        free(band);
+      }
+    }
+  }
+
+  // for (const std::vector<float *> &bands : samples) {
   //   cv::Mat temp;
   //   cv::Mat r, g, b;
   //
   //   temp = cv::Mat(256, 256, CV_32F, bands[0]);
   //
-  //   cv::divide(100000.0, temp, r);
+  //   cv::divide(150000.0, temp, r);
   //
   //   temp = cv::Mat(256, 256, CV_32F, bands[1]);
-  //   cv::divide(100000.0, temp, g);
+  //   cv::divide(150000.0, temp, g);
   //
   //   temp = cv::Mat(256, 256, CV_32F, bands[2]);
-  //   cv::divide(100000.0, temp, b);
+  //   cv::divide(150000.0, temp, b);
   //
   //   cv::Mat together;
   //   cv::merge(std::vector{b, g, r}, together);
   //   together.convertTo(together, CV_8UC3);
+  //
+  //   cv::Mat clouds = cv::Mat(256, 256, CV_32F, bands[bands.size() - 2]);
+  //   cv::divide(10.0, clouds, clouds);
   //
   //   // cv::Mat kmeans;
   //   // cv::kmeans(together, 10, kmeans,
@@ -58,8 +71,10 @@ int main() {
   //   // kmeans.convertTo(togetherOut, CV_8U);
   //
   //   // cv::imwrite("out.png", togetherOut);
+  //   // cv::namedWindow("bro?");
   //   cv::imshow("bro?", together);
-  //   // cv::waitKey();
+  //   cv::imshow("clouds?", clouds);
+  //   cv::waitKey();
   //   //
   //   for (const auto &band : bands) {
   //     free(band);
