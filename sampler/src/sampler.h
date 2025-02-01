@@ -69,10 +69,17 @@ private:
     }
   }
 
+  struct NormalizationPercentile {
+    float lower; // 1st
+    float upper; // 99th
+  };
+
   struct ComputationCache {
     SampleCache sampleCache;
 
     size_t maxDimX, maxDimY;
+
+    std::vector<NormalizationPercentile> bandPercentiles;
 
     // For cache invalidation
     std::string productName;
@@ -90,6 +97,9 @@ private:
 
     // std::optional<SampleCache> cache;
   };
+
+  std::pair<std::vector<NormalizationPercentile>, std::optional<std::string>>
+  getNormalizationPercentiles(const SampleInfo &info);
 
   std::vector<SampleInfo> infos;
 

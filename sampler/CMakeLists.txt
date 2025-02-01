@@ -11,13 +11,13 @@ endif()
 
 find_package(CUDAToolkit)
 
-add_library(satsample src/sampler.cpp src/cpu/mapgen.cpp src/cdlCache.cpp)
+add_library(satsample src/sampler.cpp src/cpu/mapgen.cpp src/cpu/percentile.cpp src/cdlCache.cpp)
 
 if (CUDAToolkit_FOUND)
     enable_language(CUDA)
     # set(CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS} "-g -G")
     # set(CUDA_NVCC_FLAGS "-g -G")
-    target_sources(satsample PRIVATE src/cuda/mapgen.cu src/cuda/maskJoin.cu)
+    target_sources(satsample PRIVATE src/cuda/mapgen.cu src/cuda/maskJoin.cu src/cuda/percentile.cu)
     target_compile_definitions(satsample PRIVATE HAS_CUDA)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -default-stream per-thread")
     target_link_libraries(satsample PUBLIC CUDA::cudart)

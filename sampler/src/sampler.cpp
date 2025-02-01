@@ -1,6 +1,8 @@
 #include "sampler.h"
 #include "cpu/mapgen.h"
+#include "cpu/percentile.h"
 #include "cuda/mapgen.h"
+#include "cuda/percentile.h"
 #include <algorithm>
 #include <bit>
 #include <cassert>
@@ -132,8 +134,8 @@ std::optional<std::string>
 Sampler::writeCacheEntry(sqlite3 *conn, const ComputationCache &cache) {
   const char *updateQuery =
       "INSERT OR REPLACE INTO COMPUTATIONS(PRODUCT, SAMPLEMAP, SAMPLEDIMX, "
-      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD)"
-      "  VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
+      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD, BANDPERCENTILES)"
+      "  VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
   sqlite3_stmt *stmt;
   if (sqlite3_prepare_v2(conn, updateQuery, -1, &stmt, NULL) != SQLITE_OK) {
@@ -151,6 +153,10 @@ Sampler::writeCacheEntry(sqlite3 *conn, const ComputationCache &cache) {
   sqlite3_bind_int64(stmt, 6, *((int64_t *)&cache.maxDimX));
   sqlite3_bind_int64(stmt, 7, *((int64_t *)&cache.maxDimY));
   sqlite3_bind_int64(stmt, 8, *((int64_t *)&cache.unixModTime));
+  sqlite3_bind_blob(stmt, 9, cache.bandPercentiles.data(),
+                    cache.bandPercentiles.size() *
+                        sizeof(NormalizationPercentile),
+                    SQLITE_STATIC);
 
   int ret;
   while (ret = sqlite3_step(stmt), ret == SQLITE_ROW || ret == SQLITE_OK) {
@@ -185,16 +191,18 @@ std::optional<std::string> Sampler::setupSQLCache() {
 
   const char *tableSetup =
       "CREATE TABLE IF NOT EXISTS COMPUTATIONS("
-      "PRODUCT       TEXT                PRIMARY KEY     NOT NULL,"
-      "SAMPLEMAP     BLOB                                NOT NULL,"
-      "SAMPLEDIMX    UNSIGNED BIG INT                    NOT NULL,"
-      "SAMPLEDIMY    UNSIGNED BIG INT                    NOT NULL,"
-      "NOK           UNSIGNED BIG INT                    NOT NULL,"
+      "PRODUCT         TEXT                PRIMARY KEY     NOT NULL,"
+      "SAMPLEMAP       BLOB                                NOT NULL,"
+      "SAMPLEDIMX      UNSIGNED BIG INT                    NOT NULL,"
+      "SAMPLEDIMY      UNSIGNED BIG INT                    NOT NULL,"
+      "NOK             UNSIGNED BIG INT                    NOT NULL,"
       ""
-      "MAXDIMX       UNSIGNED BIG INT                    NOT NULL,"
-      "MAXDIMY       UNSIGNED BIG INT                    NOT NULL,"
+      "MAXDIMX         UNSIGNED BIG INT                    NOT NULL,"
+      "MAXDIMY         UNSIGNED BIG INT                    NOT NULL,"
       ""
-      "LASTMOD       UNSIGNED BIG INT                    NOT NULL"
+      "BANDPERCENTILES BLOB                              NOT NULL,"
+      ""
+      "LASTMOD         UNSIGNED BIG INT                    NOT NULL"
       ");";
 
   // assert(sampleOptions.nThreads > 0);
@@ -227,9 +235,10 @@ std::optional<std::string> Sampler::getCacheEntry(sqlite3 *conn,
                                                   const SampleInfo &info,
                                                   ComputationCache *cache,
                                                   bool *oCachePresent) {
-  const char *query = "SELECT SAMPLEMAP, SAMPLEDIMX, "
-                      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD "
-                      "FROM COMPUTATIONS WHERE PRODUCT = ?;";
+  const char *query =
+      "SELECT SAMPLEMAP, SAMPLEDIMX, "
+      "SAMPLEDIMY, NOK, MAXDIMX, MAXDIMY, LASTMOD, BANDPERCENTILES "
+      "FROM COMPUTATIONS WHERE PRODUCT = ?;";
 
   sqlite3_stmt *stmt;
   int ret = sqlite3_prepare_v2(conn, query, -1, &stmt, NULL);
@@ -282,6 +291,13 @@ std::optional<std::string> Sampler::getCacheEntry(sqlite3 *conn,
   uint64_t lastMod;
   int64_t sqliteLastmod = sqlite3_column_int64(stmt, 6);
   lastMod = *((uint64_t *)&sqliteLastmod); // evil
+
+  cache->bandPercentiles.clear();
+  size_t nPercentileElements =
+      sqlite3_column_bytes(stmt, 7) / sizeof(NormalizationPercentile);
+  cache->bandPercentiles.resize(nPercentileElements);
+  memcpy(cache->bandPercentiles.data(), sqlite3_column_blob(stmt, 7),
+         nPercentileElements * sizeof(NormalizationPercentile));
 
   sqlite3_finalize(stmt);
 
@@ -587,6 +603,65 @@ Sampler::genSampleCache(const SampleInfo &info,
   return ret;
 };
 
+std::pair<std::vector<Sampler::NormalizationPercentile>,
+          std::optional<std::string>>
+Sampler::getNormalizationPercentiles(const SampleInfo &info) {
+  const std::vector<size_t> percentiles = {1, 99};
+
+  std::vector<Sampler::NormalizationPercentile> normalizationPercentiles;
+  for (const auto &flavor : flavors) {
+    std::string dsPath =
+        "/vsizip/" + (std::filesystem::canonical(info.path) /
+                      (info.productName + "-" + flavor + ".tif"))
+                         .string();
+
+    GDALDatasetUniquePtr ds =
+        GDALDatasetUniquePtr(GDALDataset::Open(dsPath.c_str(), GF_Read));
+
+    if (!ds) {
+      return std::make_pair(std::vector<NormalizationPercentile>{},
+                            std::format("failed to open product: {}", dsPath));
+    }
+
+    for (const auto &band : ds->GetBands()) {
+      float *data =
+          (float *)malloc(sizeof(float) * band->GetXSize() * band->GetYSize());
+
+      CPLErr e = band->RasterIO(GF_Read, 0, 0, ds->GetRasterXSize(),
+                                ds->GetRasterYSize(), (void *)data,
+                                ds->GetRasterXSize(), ds->GetRasterYSize(),
+                                GDT_Float32, 0, 0);
+
+      if (e) {
+        free(data);
+        return std::make_pair(
+            std::vector<NormalizationPercentile>{},
+            std::format("failed to read band {} of {}, error {}",
+                        band->GetBand(), dsPath, (int)e));
+      }
+
+#if 0 & HAS_CUDA
+      auto bandPercentiles = ::sats::cuda::percentiles(
+          data, band->GetXSize() * band->GetYSize(), percentiles);
+#else
+      auto bandPercentiles = cpuproc::percentiles(
+          data, band->GetXSize() * band->GetYSize(), percentiles);
+#endif
+
+      assert(bandPercentiles.size() == percentiles.size());
+
+      normalizationPercentiles.push_back({
+          .lower = bandPercentiles[0],
+          .upper = bandPercentiles[1],
+      });
+
+      free(data);
+    }
+  }
+
+  return std::make_pair(normalizationPercentiles, std::nullopt);
+}
+
 std::optional<std::string> Sampler::ensureCache() {
   std::vector<SampleInfo *> cacheGenQueue(infos.size(), nullptr);
   size_t cacheGenQueueIndex = 0;
@@ -654,7 +729,25 @@ std::optional<std::string> Sampler::ensureCache() {
         cacheGenError += ", ";
       }
 
-      cacheGenError += cacheGenQueue[i]->productName + ": " + err;
+      cacheGenError += cacheGenQueue[i]->productName + ": " + err + "\n";
+
+      omp_unset_lock(&cacheGenErrorLock);
+
+      continue;
+    }
+
+    auto [normalizationPercentiles, percentileErr] =
+        getNormalizationPercentiles(*cacheGenQueue[i]);
+
+    if (percentileErr) {
+      omp_set_lock(&cacheGenErrorLock);
+      if (cacheGenError.size() != 0) {
+        cacheGenError += ", ";
+      }
+
+      cacheGenError +=
+          cacheGenQueue[i]->productName +
+          " percentile generation error: " + percentileErr.value() + "\n";
 
       omp_unset_lock(&cacheGenErrorLock);
 
@@ -686,6 +779,7 @@ std::optional<std::string> Sampler::ensureCache() {
     ComputationCache cache = {.sampleCache = std::move(sampleCache.value()),
                               .maxDimX = maxDims->first,
                               .maxDimY = maxDims->second,
+                              .bandPercentiles = normalizationPercentiles,
                               .productName =
                                   cacheGenQueue[i]->productName.c_str(),
                               .unixModTime = lastModTime};
@@ -808,7 +902,7 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
         sampleIndexX *= scalingFactor;
         sampleIndexY *= scalingFactor;
 
-        std::cout << "final path: " << info.path << std::endl;
+        // std::cout << "final path: " << info.path << std::endl;
 
         std::vector<float *> bands;
         for (const auto &flavor : flavors) {
@@ -837,12 +931,12 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
 
           bool readError = false;
           for (const auto &band : ds->GetBands()) {
-            std::cout << "read band " << band->GetBand() << " of "
-                      << info.productName << " of flavor " << flavor
-                      << std::format("({}, {}, {}, {})", sampleIndexX,
-                                     sampleIndexY, cacheGenOptions.sampleDim,
-                                     cacheGenOptions.sampleDim)
-                      << std::endl;
+            // std::cout << "read band " << band->GetBand() << " of "
+            //           << info.productName << " of flavor " << flavor
+            //           << std::format("({}, {}, {}, {})", sampleIndexX,
+            //                          sampleIndexY, cacheGenOptions.sampleDim,
+            //                          cacheGenOptions.sampleDim)
+            //           << std::endl;
             float *data =
                 (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
                                 cacheGenOptions.sampleDim);
@@ -865,6 +959,7 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
             }
 
             if (!readError) {
+
               bands.push_back(data);
             } else {
               for (const auto &band : bands) {
@@ -877,7 +972,16 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
           // ds->Close();
         }
 
-        freeSampleCache(*cache);
+        // percentile based linear normalization
+        for (size_t i = 0; i < bands.size(); i++) {
+          NormalizationPercentile norm = sampleInfo.cache->bandPercentiles[i];
+
+          for (size_t j = 0;
+               j < cacheGenOptions.sampleDim * cacheGenOptions.sampleDim; j++) {
+            bands[i][j] =
+                (bands[i][j] - norm.lower) * (1.0 / (norm.upper - norm.lower));
+          }
+        }
 
         if (!bands.empty()) {
 #pragma omp critical(UPDATE_BANDS)
@@ -886,6 +990,16 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
       }
     }
   }
+
+  for (auto &cache : caches) {
+    // std::cout << "cache: " << cache.first->productName << std::endl;
+    // for (const auto &percentile : cache.second.bandPercentiles) {
+    //   std::cout << "\tpercentiles: " << percentile.lower << ", "
+    //             << percentile.upper << std::endl;
+    // }
+    freeSampleCache(cache.second.sampleCache);
+  }
+
   // 3. return (join)
   return reads;
 }

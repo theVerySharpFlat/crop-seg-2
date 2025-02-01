@@ -16,7 +16,7 @@ int main() {
 
   sats::Sampler s(
       "../data/",
-      {.dbPath = "cache.db", .nCacheGenThreads = 8, .nCacheQueryThreads = 16},
+      {.dbPath = "cache.db", .nCacheGenThreads = 16, .nCacheQueryThreads = 32},
       {
           .minOKPercentage = 0.99,
           .sampleDim = 256,
@@ -31,6 +31,22 @@ int main() {
     assert(samples.size() == nSamples);
 
     for (const auto &sample : samples) {
+      cv::Mat temp;
+      cv::Mat r, g, b;
+
+      r = cv::Mat(256, 256, CV_32F, sample[0]);
+
+      g = cv::Mat(256, 256, CV_32F, sample[1]);
+
+      b = cv::Mat(256, 256, CV_32F, sample[2]);
+
+      cv::Mat together;
+      cv::merge(std::vector{b, g, r}, together);
+      together.convertTo(together, CV_32FC3);
+
+      cv::imshow("bro?", together);
+      cv::waitKey();
+
       for (const auto &band : sample) {
         free(band);
       }
