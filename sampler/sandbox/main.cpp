@@ -26,7 +26,7 @@ int main() {
       std::nullopt);
 
   for (size_t i = 0; i < 100; i++) {
-    size_t nSamples = 100;
+    size_t nSamples = 1;
     auto samples = s.randomSampleV2(nSamples);
     assert(samples.size() == nSamples);
 
@@ -40,10 +40,14 @@ int main() {
 
       b = cv::Mat(256, 256, CV_32F, sample[2]);
 
+      cv::Mat c = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 1]);
+      c /= 11.0;
+
       cv::Mat together;
       cv::merge(std::vector{b, g, r}, together);
       together.convertTo(together, CV_32FC3);
 
+      cv::imshow("bro???", c);
       cv::imshow("bro?", together);
       cv::waitKey();
 

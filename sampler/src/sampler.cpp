@@ -498,6 +498,7 @@ Sampler::genSampleCache(const SampleInfo &info,
   }
 
   size_t nBands = ds->GetBands().size();
+  // std::cout << "nBands: " << nBands << std::endl;
   if (nBands < 2) {
     return std::make_pair(std::nullopt,
                           "mask dataset doesn't have enough bands!");
@@ -510,8 +511,9 @@ Sampler::genSampleCache(const SampleInfo &info,
     }
   }
 
-  size_t cldIdx = nBands - 2;
-  size_t snwIdx = nBands - 1;
+  size_t cldIdx = nBands - 3;
+  size_t snwIdx = nBands - 2;
+  size_t sclIdx = nBands - 1;
 
   uint8_t ***bands = (uint8_t ***)malloc(
       sizeof(uint8_t) * ds->GetRasterXSize() * ds->GetRasterYSize() * nBands);
@@ -539,24 +541,27 @@ Sampler::genSampleCache(const SampleInfo &info,
 
   size_t scalingFactor = info.maxDimX / ds->GetRasterXSize();
 
-#if 0 && HAS_CUDA
+#if HAS_CUDA
   cudaproc::generateSampleMap(
-      (unsigned char *)bands, nBands - 2,
+      (unsigned char *)bands, nBands - 3,
       (unsigned char *)((char *)bands + cldIdx * nPixels),
       cacheGenOptions.cldMax,
       (unsigned char *)((char *)bands + snwIdx * nPixels),
-      cacheGenOptions.snwMax, (unsigned char *)stage, ds->GetRasterXSize(),
-      ds->GetRasterYSize(), cacheGenOptions.sampleDim / scalingFactor,
+      cacheGenOptions.snwMax,
+      (unsigned char *)((char *)bands + sclIdx * nPixels),
+      (unsigned char *)stage, ds->GetRasterXSize(), ds->GetRasterYSize(),
+      cacheGenOptions.sampleDim / scalingFactor,
       cacheGenOptions.minOKPercentage);
 #else
   cpuproc::generateSampleMap(
-      (unsigned char *)bands, nBands - 2,
+      (unsigned char *)bands, nBands - 3,
       (unsigned char *)((char *)bands + cldIdx * nPixels),
       cacheGenOptions.cldMax,
       (unsigned char *)((char *)bands + snwIdx * nPixels),
-      cacheGenOptions.snwMax, (unsigned char *)stage, ds->GetRasterXSize(),
-      ds->GetRasterYSize(), cacheGenOptions.sampleDim,
-      cacheGenOptions.minOKPercentage);
+      cacheGenOptions.snwMax,
+      (unsigned char *)((char *)bands + sclIdx * nPixels),
+      (unsigned char *)stage, ds->GetRasterXSize(), ds->GetRasterYSize(),
+      cacheGenOptions.sampleDim, cacheGenOptions.minOKPercentage);
 #endif
 
   size_t nPixelsCondensed = (size_t)(std::ceil(nPixels / 64.0) * 8);
@@ -973,7 +978,7 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
         }
 
         // percentile based linear normalization
-        for (size_t i = 0; i < bands.size(); i++) {
+        for (size_t i = 0; i < bands.size() - 1; i++) {
           NormalizationPercentile norm = sampleInfo.cache->bandPercentiles[i];
 
           for (size_t j = 0;

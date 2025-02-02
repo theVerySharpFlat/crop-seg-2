@@ -17,7 +17,7 @@ sats::cpuproc::percentiles(const float *data, size_t len,
     assert(percentile <= 100);
 
     size_t index = ((float)percentile / 100.0) * len;
-    std::cout << "index: " << index << std::endl;
+    // std::cout << "index: " << index << std::endl;
 
     outPercentiles.push_back(sorted[index]);
   }

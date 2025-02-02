@@ -263,8 +263,9 @@ namespace sats::cudaproc {
 void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                        unsigned char *cldMask, unsigned char maxCldPercentage,
                        unsigned char *snwMask, unsigned char maxSnwPercentage,
-                       unsigned char *outMask, size_t bandDimX, size_t bandDimY,
-                       size_t sampleSize, float minNonzeroPercentage) {
+                       unsigned char *sclMask, unsigned char *outMask,
+                       size_t bandDimX, size_t bandDimY, size_t sampleSize,
+                       float minNonzeroPercentage) {
 
   // join detfoo masks
   cudaPitchedPtr d_detfooMasksPtr;
@@ -339,6 +340,22 @@ void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
   cudaStreamSynchronize(0);
   gpuErrchk(cudaPeekAtLastError());
   gpuErrchkPassthrough(cudaFree(d_snwMaskPtr.ptr));
+
+  cudaPitchedPtr d_sclMaskPtr = {};
+  d_sclMaskPtr.xsize = bandDimX;
+  d_sclMaskPtr.ysize = bandDimY;
+  gpuErrchk(cudaMallocPitch(&d_sclMaskPtr.ptr, &d_sclMaskPtr.pitch,
+                            d_sclMaskPtr.xsize * sizeof(unsigned char),
+                            d_sclMaskPtr.ysize));
+  gpuErrchk(cudaMemcpy2D(d_sclMaskPtr.ptr, d_sclMaskPtr.pitch, (void *)sclMask,
+                         bandDimX * sizeof(unsigned char),
+                         bandDimX * sizeof(unsigned char), bandDimY,
+                         cudaMemcpyHostToDevice));
+  JoinUCharMasks<<<blocksPerGrid, threadsPerBlock>>>(
+      d_sclMaskPtr, d_outPtr, bandDimX, bandDimY, 1, 4, 6);
+  cudaStreamSynchronize(0);
+  gpuErrchk(cudaPeekAtLastError());
+  gpuErrchkPassthrough(cudaFree(d_sclMaskPtr.ptr));
 
   // std::cout << "finished b" << std::endl;
 

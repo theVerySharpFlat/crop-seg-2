@@ -92,14 +92,16 @@ void mapgen(uint8_t *mask, size_t bandDimX, size_t bandDimY, size_t sampleSize,
 void generateSampleMap(unsigned char *detfooMasks, size_t nDetfooMasks,
                        unsigned char *cldMask, unsigned char maxCldPercentage,
                        unsigned char *snwMask, unsigned char maxSnwPercentage,
-                       unsigned char *outMask, size_t bandDimX, size_t bandDimY,
-                       size_t sampleSize, float minNonzeroPercentage) {
+                       unsigned char *sclMask, unsigned char *outMask,
+                       size_t bandDimX, size_t bandDimY, size_t sampleSize,
+                       float minNonzeroPercentage) {
 
   std::memset(outMask, 1, bandDimX * bandDimY * sizeof(uint8_t));
 
   joinUCharMasks(detfooMasks, outMask, bandDimX, bandDimY, nDetfooMasks);
   joinUCharMasks(cldMask, outMask, bandDimX, bandDimY, 1, 0, maxCldPercentage);
   joinUCharMasks(snwMask, outMask, bandDimX, bandDimY, 1, 0, maxSnwPercentage);
+  joinUCharMasks(sclMask, outMask, bandDimX, bandDimY, 1, 4, 6);
 
   mapgen(outMask, bandDimX, bandDimY, sampleSize, minNonzeroPercentage);
 }

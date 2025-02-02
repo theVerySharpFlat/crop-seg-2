@@ -6,7 +6,7 @@ TARGET_CRS="EPSG:3857"
 
 TARGET_BANDS_HIRES="B02_10m B03_10m B04_10m B08_10m"
 TARGET_BANDS_LOWRES="B05_20m B06_20m B07_20m B8A_20m B11_20m B12_20m"
-TARGET_BANDS_QA="MSK_CLDPRB_20m MSK_SNWPRB_20m"
+TARGET_BANDS_QA="MSK_CLDPRB_20m MSK_SNWPRB_20m SCL_20m"
 
 buildSubDS() {
     local PRODUCT_ZIP=$1
@@ -55,13 +55,15 @@ buildSampleMask() {
     local DETFOO_MASKS=$(unzip -Z1 $PRODUCT_ZIP | grep -E "DETFOO.*.jp2$" | xargs -I {} echo /vsizip/$PRODUCT_ZIP/{} | paste -s -d ' ')
     local CLD_MASK="/vsizip/$PRODUCT_ZIP/$(unzip -Z1 $PRODUCT_ZIP | grep -E "CLD.*20m.jp2$")"
     local SNW_MASK="/vsizip/$PRODUCT_ZIP/$(unzip -Z1 $PRODUCT_ZIP | grep -E "SNW.*20m.jp2$")"
+    local SCL_MASK="/vsizip/$PRODUCT_ZIP/$(unzip -Z1 $PRODUCT_ZIP | grep -E "SCL.*20m.jp2$")"
 
     echo $DETFOO_MASKS
     echo $CLD_MASK
     echo $SNW_MASK
+    echo $SCL_MASK
 
     local vrtFname=$BUILD_DIR/$(basename $(echo $PRODUCT_ZIP | sed "s/.zip/-MSK.vrt/g"))
-    (set -x; gdalbuildvrt -resolution user -tr 20 20 -overwrite -separate $vrtFname $DETFOO_MASKS $CLD_MASK $SNW_MASK)
+    (set -x; gdalbuildvrt -resolution user -tr 20 20 -overwrite -separate $vrtFname $DETFOO_MASKS $CLD_MASK $SNW_MASK $SCL_MASK)
     (set -x; gdal_translate -tr 20 20 -co COMPRESS=ZSTD -co ZSTD_LEVEL=15 -co PREDICTOR=2 -co NUM_THREADS=1 -co TILED=NO $vrtFname $BUILD_DIR/$(basename $(echo $PRODUCT_ZIP | sed "s/.zip/-MSK.tif/g")))
 
     # (set -x; ./sample-map-gen/build/satsample_mapgen --dfm $DETFOO_MASKS --cld $CLD_MASK --snw $SNW_MASK --snwm 50 --cldm 50 -o $BUILD_DIR/MSK_OK.tiff)
