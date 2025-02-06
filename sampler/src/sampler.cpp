@@ -977,6 +977,23 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
           // ds->Close();
         }
 
+        // compute ndvi
+        // (B8 - B4) / (B8 + B4)
+        float *ndviMask =
+            (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
+                            cacheGenOptions.sampleDim);
+        if (!bands.empty()) {
+          const int b4Index = 2;
+          const int b8Index = 3;
+
+          for (size_t i = 0;
+               i < cacheGenOptions.sampleDim * cacheGenOptions.sampleDim; i++) {
+            float b4 = bands[b4Index][i];
+            float b8 = bands[b8Index][i];
+            ndviMask[i] = (b8 - b4) / (b4 + b8);
+          }
+        }
+
         // percentile based linear normalization
         for (size_t i = 0; i < bands.size() - 1; i++) {
           NormalizationPercentile norm = sampleInfo.cache->bandPercentiles[i];
@@ -989,6 +1006,8 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
         }
 
         if (!bands.empty()) {
+          bands.push_back(ndviMask);
+
 #pragma omp critical(UPDATE_BANDS)
           reads.push_back(bands);
         }

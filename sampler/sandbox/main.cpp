@@ -3,6 +3,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/core/base.hpp>
 #include <opencv2/core/hal/interface.h>
+#include <opencv2/core/mat.hpp>
 #include <opencv2/core/matx.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -18,7 +19,7 @@ int main() {
       "../data/",
       {.dbPath = "cache.db", .nCacheGenThreads = 16, .nCacheQueryThreads = 32},
       {
-          .minOKPercentage = 0.99,
+          .minOKPercentage = 0.9999,
           .sampleDim = 256,
           .cldMax = 50,
           .snwMax = 50,
@@ -40,8 +41,20 @@ int main() {
 
       b = cv::Mat(256, 256, CV_32F, sample[2]);
 
-      cv::Mat c = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 1]);
+      cv::Mat c = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 2]);
       c /= 11.0;
+
+      cv::Mat ndvi = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 1]);
+      for (int r = 0; r < ndvi.rows; r++) {
+        for (int c = 0; c < ndvi.cols; c++) {
+          if (ndvi.at<float>(cv::Vec2i{r, c}) < 0.2) {
+            ndvi.at<float>(cv::Vec2i{r, c}) = 0.0;
+          }
+        }
+      }
+      cv::merge(std::vector{cv::Mat(256, 256, CV_32FC1, 0.0), ndvi,
+                            cv::Mat(256, 256, CV_32FC1, 0.0)},
+                ndvi);
 
       cv::Mat together;
       cv::merge(std::vector{b, g, r}, together);
@@ -49,6 +62,7 @@ int main() {
 
       cv::imshow("bro???", c);
       cv::imshow("bro?", together);
+      cv::imshow("bro????", ndvi);
       cv::waitKey();
 
       for (const auto &band : sample) {
