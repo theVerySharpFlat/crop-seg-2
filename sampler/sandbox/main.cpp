@@ -35,16 +35,20 @@ int main() {
       cv::Mat temp;
       cv::Mat r, g, b;
 
-      r = cv::Mat(256, 256, CV_32F, sample[0]);
+      r = cv::Mat(256, 256, CV_32F, (float *)sample.bands[0].data());
 
-      g = cv::Mat(256, 256, CV_32F, sample[1]);
+      g = cv::Mat(256, 256, CV_32F, (float *)sample.bands[1].data());
 
-      b = cv::Mat(256, 256, CV_32F, sample[2]);
+      b = cv::Mat(256, 256, CV_32F, (float *)sample.bands[2].data());
 
-      cv::Mat c = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 2]);
-      c /= 11.0;
+      // cv::Mat c =
+      //     cv::Mat(256, 256, CV_32FC1,
+      //             (float *)sample.bands[sample.bands.size() - 2].data());
+      // c /= 11.0;
 
-      cv::Mat ndvi = cv::Mat(256, 256, CV_32FC1, sample[sample.size() - 1]);
+      cv::Mat ndvi =
+          cv::Mat(256, 256, CV_32FC1,
+                  (float *)sample.bands[sample.bands.size() - 1].data());
       for (int r = 0; r < ndvi.rows; r++) {
         for (int c = 0; c < ndvi.cols; c++) {
           if (ndvi.at<float>(cv::Vec2i{r, c}) < 0.2) {
@@ -52,22 +56,19 @@ int main() {
           }
         }
       }
+      cv::Mat ndviOut;
       cv::merge(std::vector{cv::Mat(256, 256, CV_32FC1, 0.0), ndvi,
                             cv::Mat(256, 256, CV_32FC1, 0.0)},
-                ndvi);
+                ndviOut);
 
       cv::Mat together;
       cv::merge(std::vector{b, g, r}, together);
       together.convertTo(together, CV_32FC3);
 
-      cv::imshow("bro???", c);
+      // cv::imshow("bro???", c);
       cv::imshow("bro?", together);
-      cv::imshow("bro????", ndvi);
+      cv::imshow("bro????", ndviOut);
       cv::waitKey();
-
-      for (const auto &band : sample) {
-        free(band);
-      }
     }
   }
 

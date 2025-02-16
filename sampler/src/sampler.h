@@ -4,9 +4,14 @@
 #include <filesystem>
 #include <omp.h>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <sqlite3.h>
+
+#ifndef PYBIND11_EXPORT
+#define PYBIND11_EXPORT
+#endif
 
 class SamplerTest_IndexTest_Test;
 namespace sats {
@@ -36,6 +41,16 @@ public:
     uint8_t cldMax, snwMax;
   };
 
+  struct Sample {
+    std::vector<std::vector<float>> bands;
+
+    std::string crs;
+    std::pair<size_t, size_t> coordsMin;
+    std::pair<size_t, size_t> coordsMax;
+
+    size_t year, month, day;
+  };
+
   Sampler() = delete;
 
   virtual ~Sampler();
@@ -46,7 +61,9 @@ public:
 
   std::vector<float *> randomSample();
 
-  std::vector<std::vector<float *>> randomSampleV2(size_t n);
+  std::vector<Sample> randomSampleV2(size_t n);
+
+  size_t getSampleDim() const { return cacheGenOptions.sampleDim; }
 
 private:
   friend class ::SamplerTest_IndexTest_Test;
@@ -98,6 +115,9 @@ private:
     // std::optional<SampleCache> cache;
   };
 
+  static std::string getDSPath(const SampleInfo &info,
+                               const std::string &flavor);
+
   std::pair<std::vector<NormalizationPercentile>, std::optional<std::string>>
   getNormalizationPercentiles(const SampleInfo &info);
 
@@ -123,8 +143,16 @@ private:
   std::pair<std::optional<SampleCache>, std::string>
   genSampleCache(const SampleInfo &info, SampleCacheGenOptions genOptions);
 
-  SampleCacheGenOptions cacheGenOptions;
+public:
+  bool preproc;
+  std::filesystem::path dataPath;
   SampleOptions sampleOptions;
+  SampleCacheGenOptions cacheGenOptions;
+  std::optional<DateRange> dateRange;
+
+  std::unordered_map<size_t, std::string> yearToCDL;
+
+private:
 };
 
 } // namespace sats

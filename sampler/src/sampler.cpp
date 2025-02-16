@@ -30,7 +30,7 @@
 
 namespace sats {
 
-static const std::string flavors[] = {"HIRES", "LOWRES", "MSK"};
+static const std::string flavors[] = {"HIRES", "LOWRES"};
 
 static std::optional<std::string>
 getProductName(const std::filesystem::path &path) {
@@ -352,6 +352,11 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
                  std::optional<DateRange> dateRange, bool preproc)
     : cacheGenOptions(cacheGenOptions), sampleOptions(sampleOptions) {
   GDALAllRegister();
+  this->dataPath = dataDir;
+  this->cacheGenOptions = cacheGenOptions;
+  this->sampleOptions = sampleOptions;
+  this->dateRange = dateRange;
+  this->preproc = preproc;
 
   std::regex re("^REPACK_S2[A-Z]_[A-Z0-9]+_(\\d{4})(\\d{2})(\\d{2})T[1-9]+_[A-"
                 "Z0-9]+_[A-Z0-9]+_([A-Z0-9]+)_[A-Z0-9]+\\.SAFE\\.zip$");
@@ -416,6 +421,27 @@ Sampler::Sampler(const std::filesystem::path &dataDir,
 
     std::cout << year << " " << month << " " << day << " " << tileName << ": "
               << path << std::endl;
+  }
+
+  std::regex cdlRe("^([0-9]{4})_30m_cdls.tif$");
+
+  for (const auto &path :
+       std::filesystem::recursive_directory_iterator(dataDir)) {
+    if (path.is_directory())
+      continue;
+
+    std::smatch match;
+
+    const std::string &fname = path.path().filename().string();
+    if (!std::regex_match(fname, match, cdlRe))
+      continue;
+
+    size_t year = std::stoi(match[1]);
+
+    yearToCDL[year] =
+        std::format("vrt://{}", std::filesystem::canonical(path).string());
+
+    std::cout << "cdl " << year << ": " << yearToCDL[year] << std::endl;
   }
 
   auto sqlInitError = setupSQLCache();
@@ -812,7 +838,40 @@ std::optional<std::string> Sampler::ensureCache() {
   return std::nullopt;
 } // namespace sats
 
-std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
+std::string Sampler::getDSPath(const SampleInfo &info,
+                               const std::string &flavor) {
+  std::string dsPath =
+      "vrt:///vsizip/" +
+      (std::filesystem::canonical(info.path) /
+       (info.productName + "-" + flavor + ".tif" +
+        std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
+          .string();
+
+  return dsPath;
+}
+
+static std::string getDatasetCRS(const std::string &path) {
+  GDALDatasetUniquePtr ds =
+      GDALDatasetUniquePtr(GDALDataset::Open(path.c_str()));
+
+  return std::string(ds->GetProjectionRef());
+}
+
+static std::pair<size_t, size_t>
+datasetPixelToCRS(const std::string &path,
+                  const std::pair<size_t, size_t> &pixelCoords) {
+  GDALDatasetUniquePtr ds =
+      GDALDatasetUniquePtr(GDALDataset::Open(path.c_str()));
+
+  double gt[6];
+  ds->GetGeoTransform(gt);
+
+  return std::make_pair(
+      gt[0] + pixelCoords.first * gt[1] + pixelCoords.second * gt[2],
+      gt[3] + pixelCoords.first * gt[4] + pixelCoords.second * gt[5]);
+}
+
+std::vector<Sampler::Sample> Sampler::randomSampleV2(size_t n) {
   // 1. get files to sample (synchronous)
   // std::set<std::string> products;
   // std::set<std::pair<std::string, std::pair<
@@ -851,13 +910,13 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
       if (err) {
         std::cout << "randomSampleV2: cache read error: " << err.value()
                   << std::endl;
-        return std::vector<std::vector<float *>>{};
+        return std::vector<Sample>{};
       }
 
       if (!haveCache) {
         std::cout << "randomSampleV2: cache not present for "
                   << info->productName << std::endl;
-        return std::vector<std::vector<float *>>{};
+        return std::vector<Sample>{};
       }
     }
     ComputationCache *cache = &caches[info];
@@ -883,7 +942,7 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
   }
 
   // 2. sample (threaded)
-  std::vector<std::vector<float *>> reads;
+  std::vector<Sample> reads;
 
 #pragma omp parallel
   {
@@ -909,14 +968,9 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
 
         // std::cout << "final path: " << info.path << std::endl;
 
-        std::vector<float *> bands;
+        std::vector<std::vector<float>> bands;
         for (const auto &flavor : flavors) {
-          std::string dsPath =
-              "vrt:///vsizip/" +
-              (std::filesystem::canonical(info.path) /
-               (info.productName + "-" + flavor + ".tif" +
-                std::format("?outsize={},{}", info.maxDimX, info.maxDimY)))
-                  .string();
+          std::string dsPath = getDSPath(info, flavor);
 
           GDALDatasetUniquePtr ds =
               GDALDatasetUniquePtr(GDALDataset::FromHandle(
@@ -925,9 +979,9 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
           if (!ds) {
             std::cout << "failed to open " << dsPath << std::endl;
 
-            for (const auto &band : bands) {
-              free(band);
-            }
+            // for (const auto &band : bands) {
+            //   free(band);
+            // }
 
             continue;
 
@@ -942,13 +996,18 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
             //                          sampleIndexY, cacheGenOptions.sampleDim,
             //                          cacheGenOptions.sampleDim)
             //           << std::endl;
-            float *data =
-                (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
-                                cacheGenOptions.sampleDim);
+            // float *data =
+            //     (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
+            //                     cacheGenOptions.sampleDim);
+
+            auto &data = bands.emplace_back(cacheGenOptions.sampleDim *
+                                            cacheGenOptions.sampleDim);
+
             CPLErr e = band->RasterIO(
                 GF_Read, sampleIndexX, sampleIndexY, cacheGenOptions.sampleDim,
-                cacheGenOptions.sampleDim, data, cacheGenOptions.sampleDim,
-                cacheGenOptions.sampleDim, GDT_Float32, 0, 0);
+                cacheGenOptions.sampleDim, data.data(),
+                cacheGenOptions.sampleDim, cacheGenOptions.sampleDim,
+                GDT_Float32, 0, 0);
 
             if (e) {
               std::cout << "failed to read band " << band->GetBand() << " of "
@@ -957,31 +1016,20 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
                                        sampleIndexY, cacheGenOptions.sampleDim,
                                        cacheGenOptions.sampleDim)
                         << std::endl;
-              free(data);
-
               readError = true;
               break;
             }
 
-            if (!readError) {
-
-              bands.push_back(data);
-            } else {
-              for (const auto &band : bands) {
-                free(band);
-              }
-
+            if (readError) {
               bands.clear();
             }
           }
-          // ds->Close();
         }
 
         // compute ndvi
         // (B8 - B4) / (B8 + B4)
-        float *ndviMask =
-            (float *)malloc(sizeof(float) * cacheGenOptions.sampleDim *
-                            cacheGenOptions.sampleDim);
+        std::vector<float> ndviMask(cacheGenOptions.sampleDim *
+                                    cacheGenOptions.sampleDim);
         if (!bands.empty()) {
           const int b4Index = 2;
           const int b8Index = 3;
@@ -1006,10 +1054,23 @@ std::vector<std::vector<float *>> Sampler::randomSampleV2(size_t n) {
         }
 
         if (!bands.empty()) {
-          bands.push_back(ndviMask);
+          bands.push_back((ndviMask));
 
 #pragma omp critical(UPDATE_BANDS)
-          reads.push_back(bands);
+          reads.push_back(Sample{
+              .bands = bands,
+              .crs = getDatasetCRS(getDSPath(info, flavors[0])),
+              .coordsMin =
+                  datasetPixelToCRS(getDSPath(info, flavors[0]),
+                                    std::make_pair(sampleIndexX, sampleIndexY)),
+              .coordsMax = datasetPixelToCRS(
+                  getDSPath(info, flavors[0]),
+                  std::make_pair(sampleIndexX + cacheGenOptions.sampleDim,
+                                 sampleIndexY + cacheGenOptions.sampleDim)),
+              .year = sample.info->year,
+              .month = sample.info->month,
+              .day = sample.info->day,
+          });
         }
       }
     }

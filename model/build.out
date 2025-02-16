@@ -1,0 +1,11 @@
+Using pip 25.0 from /home/aiden/projects/crop-seg-2/model/.venv/lib64/python3.11/site-packages/pip (python 3.11)
+Processing /home/aiden/projects/crop-seg-2/sampler
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: satsamplepy
+  Building wheel for satsamplepy (pyproject.toml): started
+  Building wheel for satsamplepy (pyproject.toml): finished with status 'canceled'

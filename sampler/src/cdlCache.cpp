@@ -8,21 +8,18 @@
 #include <utility>
 #include <vrtdataset.h>
 
-namespace sats {
+namespace sats::cdl {
 
-uint8_t *CDLCache::read(const std::filesystem::path &path,
-                        const OGRSpatialReference *srs,
-                        CDLCache::ProjWin projWin, size_t *oDimX,
-                        size_t *oDimY) {
+std::vector<float> read(const std::string &openPath, const char *crs,
+                        ProjWin projWin, size_t dimX, size_t dimY) {
 
   // https://gdal.org/en/stable/drivers/raster/vrt.html#processed-dataset-vrt
-  std::string openPath =
-      std::format("{}", std::filesystem::absolute(path).string());
+  // std::string openPath =
+  //     std::format("{}", std::filesystem::absolute(path).string());
 
   GDALDatasetH srcDS = GDALOpen(openPath.c_str(), GA_ReadOnly);
-  GDALDatasetH warpedDS =
-      GDALAutoCreateWarpedVRT(srcDS, NULL, srs->exportToWkt().c_str(),
-                              GDALResampleAlg::GRA_NearestNeighbour, 0.0, NULL);
+  GDALDatasetH warpedDS = GDALAutoCreateWarpedVRT(
+      srcDS, NULL, crs, GDALResampleAlg::GRA_NearestNeighbour, 0.0, NULL);
 
   // https://gdal.org/en/stable/tutorials/geotransforms_tut.html
   // X_geo = GT(0) + X_pixel * GT(1) + Y_line * GT(2)
@@ -33,11 +30,17 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
   // Y_line  = GT_INV(3) + X_geo * GT_INV(4) + Y_geo * GT_INV(5)
 
   double dstGeoTransform[6];
-  GDALGetGeoTransform(warpedDS, dstGeoTransform);
-  double dstInvGeoTransform[6];
-  if (!GDALInvGeoTransform(dstGeoTransform, dstGeoTransform)) {
+  if (GDALGetGeoTransform(warpedDS, dstGeoTransform) != CE_None) {
     std::cout << "Failed on GeoTransform" << std::endl;
-    return nullptr;
+    return std::vector<float>();
+  }
+  // std::cout << "warped resolution: " << dstGeoTransform[1] << ", "
+  //           << dstGeoTransform[5] << std::endl;
+
+  double dstInvGeoTransform[6];
+  if (!GDALInvGeoTransform(dstGeoTransform, dstInvGeoTransform)) {
+    std::cout << "Failed on inverse GeoTransform" << std::endl;
+    return std::vector<float>();
   }
 
   double x1, y1;
@@ -54,18 +57,26 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
   GDALApplyGeoTransform(dstInvGeoTransform, projWin.xmax, projWin.ymax, &x4,
                         &y4);
 
+  // std::cout << "crs: " << crs << std::endl;
+  // std::cout << "projWin: "
+  //           << std::format("{},{},{},{}", projWin.xmin, projWin.ymin,
+  //                          projWin.xmax, projWin.ymax)
+  //           << std::endl;
+  // std::cout << "to: " << std::format("{},{},{},{}", x1, y1, x4, y4)
+  //           << std::endl;
+  // std::cout << std::endl;
   // Determine top left
   //
   // This seems to fit our needs:
   // https://stackoverflow.com/a/2819309
-  std::pair<double, double> minPixel =
-      std::min({std::make_pair(x1, y1), std::make_pair(x2, y2),
-                std::make_pair(x3, y3), std::make_pair(x4, y4)});
+  std::pair<double, double> minPixel = std::make_pair(x1, y1);
+  // std::min({std::make_pair(x1, y1), std::make_pair(x2, y2),
+  //           std::make_pair(x3, y3), std::make_pair(x4, y4)});
 
   // Determine bottom right
-  std::pair<double, double> maxPixel =
-      std::max({std::make_pair(x1, y1), std::make_pair(x2, y2),
-                std::make_pair(x3, y3), std::make_pair(x4, y4)});
+  std::pair<double, double> maxPixel = std::make_pair(x4, y4);
+  // std::max({std::make_pair(x1, y1), std::make_pair(x2, y2),
+  //           std::make_pair(x3, y3), std::make_pair(x4, y4)});
 
   int startX = (int)minPixel.first;
   int startY = (int)minPixel.second;
@@ -78,7 +89,7 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
     GDALReleaseDataset(warpedDS);
     GDALReleaseDataset(srcDS);
 
-    return nullptr;
+    return std::vector<float>();
   }
 
   if (startX > endX || startY > endY) {
@@ -87,11 +98,13 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
     GDALReleaseDataset(warpedDS);
     GDALReleaseDataset(srcDS);
 
-    return nullptr;
+    return std::vector<float>();
   }
 
-  size_t dimX = endX - startX;
-  size_t dimY = endY - startY;
+  size_t readDimX = endX - startX;
+  size_t readDimY = endY - startY;
+
+  // std::cout << "readDimx: " << readDimX << ", " << readDimY << std::endl;
 
   GDALRasterBandH band = GDALGetRasterBand(warpedDS, 1);
   if (!band) {
@@ -100,24 +113,22 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
     GDALReleaseDataset(warpedDS);
     GDALReleaseDataset(srcDS);
 
-    return nullptr;
+    return std::vector<float>();
   }
 
-  uint8_t *mem = (uint8_t *)malloc(dimX * dimY);
+  // float *mem = (float *)malloc(dimX * dimY * sizeof(float));
+  std::vector<float> mem(dimX * dimY);
 
-  CPLErr err = GDALRasterIO(band, GF_Read, startX, startY, dimX, dimY, mem,
-                            dimX, dimY, GDT_Byte, 0, 0);
+  CPLErr err = GDALRasterIO(band, GF_Read, startX, startY, readDimX, readDimY,
+                            mem.data(), dimX, dimY, GDT_Float32, 0, 0);
   if (err) {
     std::cout << "Raster IO failed!" << std::endl;
 
     GDALReleaseDataset(warpedDS);
     GDALReleaseDataset(srcDS);
 
-    return nullptr;
+    return std::vector<float>();
   }
-
-  *oDimX = dimX;
-  *oDimY = dimY;
 
   GDALReleaseDataset(warpedDS);
   GDALReleaseDataset(srcDS);
@@ -125,4 +136,4 @@ uint8_t *CDLCache::read(const std::filesystem::path &path,
   return mem;
 }
 
-} // namespace sats
+} // namespace sats::cdl
